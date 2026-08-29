@@ -45,10 +45,10 @@ $exePath = Join-Path $InstallDir 'windows-computeruse.exe'
 Copy-Item $exeSource $exePath -Force
 Write-Host "Installed binary: $exePath"
 
-# 3. Install the skill user-wide. The repo copy under .claude\skills only
-#    loads when working inside this repository; copying it to the user skills
-#    directory makes it available to every Claude Code project.
-$skillSource = Join-Path $repoRoot '.claude\skills\windows-computeruse'
+# 3. Install the skill user-wide so it is available to every Claude Code
+#    project. skills\ in the repo is the distribution source, not a live
+#    project skill.
+$skillSource = Join-Path $repoRoot 'skills\windows-computeruse'
 $skillDest = Join-Path $env:USERPROFILE '.claude\skills\windows-computeruse'
 New-Item -ItemType Directory -Force -Path $skillDest | Out-Null
 Copy-Item (Join-Path $skillSource '*') $skillDest -Recurse -Force

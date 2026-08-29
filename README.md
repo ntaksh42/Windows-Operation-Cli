@@ -10,7 +10,7 @@ Windows desktop automation MCP server (Rust).
 
 Builds the release binary, copies it to
 `%LOCALAPPDATA%\Programs\windows-computeruse`, installs the bundled skill
-(`.claude/skills/windows-computeruse`) to `%USERPROFILE%\.claude\skills` so it
+(`skills/windows-computeruse`) to `%USERPROFILE%\.claude\skills` so it
 loads in every project, and registers the MCP server in Claude Code's
 user-scope configuration (`claude mcp add --scope user`). Pass `-SkipBuild` to
 reuse an existing `target\release` binary.
