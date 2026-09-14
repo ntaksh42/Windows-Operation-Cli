@@ -64,6 +64,8 @@ Screenshot()                        # verify result
 
 Fill a form with several fields: `MultiEdit(labels=[[label, text], ...])` instead of repeated Type calls. Select multiple files/items: `MultiSelect`.
 
+`Click` and `Scroll` take a `modifier` (`shift`/`ctrl`/`alt`/`win`) held down for the duration of the action — use it for ctrl+click multi-select or ctrl+wheel zoom instead of composing `Shortcut` with a separate click, which races. `Click` also accepts `clicks=3` for a triple-click (select-line).
+
 Text entry details for `Type`: `clear=true` replaces existing content, `press_enter=true` submits, `caret_position` is `start`/`end`/`idle`. Text of 20+ characters containing none of `\n`, `\t`, `{`, `}` is pasted via clipboard automatically (fast); anything else is sent keystroke by keystroke.
 
 ## Full parameter reference

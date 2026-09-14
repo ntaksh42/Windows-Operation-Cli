@@ -114,7 +114,7 @@ pub fn coordinate_scale_text(coord_scale: f64) -> String {
 /// screen coordinates when the capture begins at a non-zero desktop origin.
 pub fn coordinate_transform_text(coord_scale: f64, origin_x: i32, origin_y: i32) -> String {
     format!(
-        "Screenshot Coordinate Transform: screen = ({origin_x} + image_x × {coord_scale}, \\
+        "Screenshot Coordinate Transform: screen = ({origin_x} + image_x × {coord_scale}, \
          {origin_y} + image_y × {coord_scale})"
     )
 }

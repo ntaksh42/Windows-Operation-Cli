@@ -81,7 +81,8 @@ Re-resolves the element by RuntimeId within its owning window and executes the f
 | loc | [x,y]? | null | one of loc/label required |
 | label | int? | null | element index from latest Snapshot; no staleness check — an old label silently targets whatever now holds that index |
 | button | left \| right \| middle | left | |
-| clicks | int | 1 | 0=hover, 1=single, 2=double |
+| clicks | int | 1 | 0=hover, 1=single, 2=double, 3=triple |
+| modifier | string? | null | shift / ctrl / alt / win — held down for the whole click, released even on failure |
 
 ### Type
 
@@ -103,6 +104,9 @@ Text of 20+ chars containing none of `\n`, `\t`, `{`, `}` is pasted via clipboar
 | type | vertical \| horizontal | vertical | |
 | direction | up \| down \| left \| right | down | must match type |
 | wheel_times | int | 1 | 1 wheel ≈ 3-5 lines |
+| modifier | string? | null | shift / ctrl / alt / win — e.g. ctrl+wheel to zoom |
+
+`type` is the wire name for the axis parameter; send `type`, not `scroll_type`.
 
 ### Move
 
@@ -131,6 +135,8 @@ Passing from_loc/duration with drag=false is an error.
 | labels | [[label,text],...]? | | |
 
 Applies Type with clear=true to each field in order.
+
+No target validation happens: each entry is typed at its coordinate whatever is there, and the call reports success even when the target holds no text field. Since `clear=true` sends Ctrl+A then Backspace first, a coordinate that has drifted since the Snapshot wipes whatever *does* have focus. Re-read coordinates from the latest Snapshot, and prefer `labels` over raw `locs`.
 
 ## Keyboard
 
@@ -188,19 +194,28 @@ Response is always `Response: {output}\nStatus Code: {code}`. Runs with -NoProfi
 
 | param | type | default | notes |
 |---|---|---|---|
-| mode | read \| write \| copy \| move \| delete \| list \| search \| info | required | |
+| mode | read \| write \| edit \| copy \| move \| delete \| list \| search \| info | required | |
 | path | string | required | relative paths resolve from the user's Desktop |
 | destination | string? | | copy/move |
 | content | string? | | write |
+| old_text / new_text | string? | | edit; both required together |
 | pattern | string? | | search (glob, required) / list (optional filter) |
+| content_pattern | string? | | search: regex applied inside the glob-matching files |
 | recursive | bool | false | delete: required for non-empty dirs; list/search: recurse into subdirectories |
 | append | bool | false | write |
 | overwrite | bool | false | copy/move onto existing target |
+| dry_run | bool | false | delete: list what would be removed, remove nothing |
 | offset / limit | int? | null | read line range; offset is 1-based |
-| encoding | string | utf-8 | |
+| encoding | string | utf-8 | WHATWG label — utf-8, utf-16le, shift_jis, windows-1252 |
 | show_hidden | bool | false | |
 
 read caps at 10 MB. list/search cap at 500 entries. Errors come back as formatted strings ("Error: File not found: ..."), not protocol errors.
+
+**`edit` mode** replaces one exact occurrence, which is what makes it safe to apply blind: `old_text` must match **exactly once**, or nothing is written. Zero matches report the closest line ("Error: old_text was not found in ... Closest line: 4: bravo-two"), several report the count ("matched 2 occurrences ... expected exactly one"). Prefer it over read-modify-`write` for a small change — `write` replaces the whole file, so a stale read silently discards concurrent edits.
+
+**`content_pattern`** turns `search` into grep: `pattern` narrows by filename, `content_pattern` then matches a regex inside those files, and hits come back as `path:line: matched text`. An invalid regex is reported rather than ignored.
+
+**`dry_run`** on delete prints the targets it would remove and removes nothing — worth a first pass whenever `recursive` is involved.
 
 ### Registry
 

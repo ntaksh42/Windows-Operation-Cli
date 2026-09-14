@@ -63,7 +63,14 @@ where
     let query_lower = query.to_lowercase();
     let mut best: Option<(&str, f64)> = None;
     for candidate in candidates {
-        let score = ratio(&query_lower, &candidate.to_lowercase());
+        let candidate_lower = candidate.to_lowercase();
+        // A short query against a long candidate ("paint" vs "Untitled -
+        // Paint") scores near zero on whole-string Levenshtein, so window and
+        // Start Menu lookups missed obvious matches. partial_ratio asks the
+        // question the caller actually means: does the query appear inside the
+        // candidate? Keep the better of the two.
+        let score = ratio(&query_lower, &candidate_lower)
+            .max(partial_ratio(&query_lower, &candidate_lower));
         if score >= score_cutoff && best.is_none_or(|(_, b)| score > b) {
             best = Some((candidate, score));
         }
@@ -92,6 +99,22 @@ mod tests {
     fn partial_ratio_substring_scores_high() {
         // Process name filter uses partial_ratio > 60.
         assert!(partial_ratio("chrome", "googlechromedev.exe") > 60.0);
+    }
+
+    #[test]
+    fn extract_one_matches_short_query_inside_long_window_title() {
+        // App switch/resize: the user says "paint", the window is "Untitled - Paint".
+        let titles = ["Untitled - Paint", "Document1 - Word"];
+        assert_eq!(
+            extract_one("paint", titles, 70.0).map(|(n, _)| n),
+            Some("Untitled - Paint")
+        );
+    }
+
+    #[test]
+    fn extract_one_still_rejects_unrelated_candidates() {
+        let titles = ["Untitled - Paint", "Document1 - Word"];
+        assert!(extract_one("spreadsheet", titles, 70.0).is_none());
     }
 
     #[test]
