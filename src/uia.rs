@@ -13,7 +13,7 @@ use std::cell::Cell;
 use std::mem::ManuallyDrop;
 use std::time::Duration;
 
-use windows::Win32::Foundation::{HWND, RECT, VARIANT_FALSE, VARIANT_TRUE};
+use windows::Win32::Foundation::{HWND, POINT, RECT, VARIANT_FALSE, VARIANT_TRUE};
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
 };
@@ -41,6 +41,11 @@ pub struct RawElement {
     pub has_keyboard_focus: bool,
     /// Only meaningful when `control_type == UIA_WindowControlTypeId`.
     pub is_modal: bool,
+    /// The provider's own clickable point, when it supplies one. Preferred
+    /// over the bounding rectangle's geometric center, which lands outside
+    /// the control for non-rectangular shapes and for containers whose
+    /// middle is covered by a child.
+    pub clickable_point: Option<(i32, i32)>,
     /// Whether `IUIAutomationScrollPattern` is present on this element at all
     /// (presence, not scrollability direction — matches the task's
     /// "ScrollPattern の有無で判定" instruction).
@@ -341,6 +346,20 @@ unsafe fn read_element(element: &IUIAutomationElement) -> RawElement {
             supported_actions.push(crate::state::SupportedAction::ExpandCollapse);
         }
 
+        // GetClickablePoint is a live cross-process call, not a Cached* read,
+        // so it is asked only for elements whose geometric center is actually
+        // in doubt (see `needs_clickable_point`). Everything else keeps the
+        // one-cache-build-per-window cost model.
+        let clickable_point = if needs_clickable_point(control_type, &rect) {
+            let mut point = POINT::default();
+            match element.GetClickablePoint(&mut point) {
+                Ok(got) if got.as_bool() => Some((point.x, point.y)),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
         RawElement {
             parent_index: None,
             runtime_id,
@@ -355,8 +374,36 @@ unsafe fn read_element(element: &IUIAutomationElement) -> RawElement {
             is_modal,
             is_scrollable,
             vertical_scroll_percent,
+            clickable_point,
         }
     }
+}
+
+/// Whether an element's geometric center is unreliable enough to justify the
+/// extra cross-process `GetClickablePoint` call.
+///
+/// Containers and large controls are the cases that miss in practice: a tab
+/// item, list item, or menu item whose middle is covered by a child, and
+/// wide/tall controls whose center falls in padding. Small leaf controls
+/// (an ordinary button) are hit correctly by their center, so they skip it.
+#[allow(non_upper_case_globals)] // matching the windows crate's UIA_*ControlTypeId consts
+fn needs_clickable_point(control_type: i32, rect: &RECT) -> bool {
+    const LARGE_EDGE: i32 = 200;
+    let width = rect.right - rect.left;
+    let height = rect.bottom - rect.top;
+    if width <= 0 || height <= 0 {
+        return false;
+    }
+    let is_container_type = matches!(
+        UIA_CONTROLTYPE_ID(control_type),
+        UIA_ListItemControlTypeId
+            | UIA_MenuItemControlTypeId
+            | UIA_TabItemControlTypeId
+            | UIA_TreeItemControlTypeId
+            | UIA_ComboBoxControlTypeId
+            | UIA_SplitButtonControlTypeId
+    );
+    is_container_type || width >= LARGE_EDGE || height >= LARGE_EDGE
 }
 
 unsafe fn runtime_id_from_safe_array(

@@ -6,17 +6,17 @@
 
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT};
+use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, POINT, RECT};
 use windows::Win32::System::Threading::{
     AttachThreadInput, GetCurrentThreadId, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     QueryFullProcessImageNameW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    ASFW_ANY, AllowSetForegroundWindow, BringWindowToTop, EnumWindows, FindWindowW, GetClassNameW,
-    GetForegroundWindow, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
-    GetWindowThreadProcessId, HWND_TOP, IsIconic, IsWindow, IsWindowVisible, IsZoomed, MoveWindow,
-    SW_RESTORE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SetForegroundWindow, SetWindowPos,
-    ShowWindow,
+    ASFW_ANY, AllowSetForegroundWindow, BringWindowToTop, EnumWindows, FindWindowW, GA_ROOT,
+    GetAncestor, GetClassNameW, GetForegroundWindow, GetWindowRect, GetWindowTextLengthW,
+    GetWindowTextW, GetWindowThreadProcessId, HWND_TOP, IsIconic, IsWindow, IsWindowVisible,
+    IsZoomed, MoveWindow, SW_RESTORE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SetForegroundWindow,
+    SetWindowPos, ShowWindow, WindowFromPoint,
 };
 use windows::core::{BOOL, PCWSTR, PWSTR};
 
@@ -203,6 +203,37 @@ pub fn list_snapshot_windows() -> Vec<SnapshotWindow> {
 /// Reads a window's current screen bounds as `(x, y, width, height)`.
 pub fn get_window_rect(handle: isize) -> Option<(i32, i32, i32, i32)> {
     window_rect(handle)
+}
+
+/// Whether `(x, y)` is covered by a window belonging to a different top-level
+/// window than `owner_handle`.
+///
+/// UI Automation reports an element's bounds regardless of what is drawn on
+/// top of it, so a control behind another window still looks clickable. A
+/// click there lands on whatever is in front. `WindowFromPoint` returns the
+/// window that would actually receive the click; anything in `owner_handle`'s
+/// own top-level chain (its child controls) counts as the owner itself.
+pub fn is_point_occluded(x: i32, y: i32, owner_handle: isize) -> bool {
+    unsafe {
+        let hit = WindowFromPoint(POINT { x, y });
+        if hit.0.is_null() {
+            // Nothing there to intercept the click; treat it as reachable and
+            // let the existing bounds checks decide.
+            return false;
+        }
+        let owner = HWND(owner_handle as *mut _);
+        if hit == owner {
+            return false;
+        }
+        // A hit on one of the owner's own controls resolves to the same
+        // top-level window.
+        let hit_root = GetAncestor(hit, GA_ROOT);
+        let owner_root = GetAncestor(owner, GA_ROOT);
+        if !hit_root.0.is_null() && hit_root == owner_root {
+            return false;
+        }
+        true
+    }
 }
 
 /// Finds the best fuzzy-name match (score_cutoff 70) among currently open windows.

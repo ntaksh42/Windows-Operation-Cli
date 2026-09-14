@@ -324,10 +324,30 @@ fn raw_to_node(
         supported_actions: el.supported_actions.clone(),
         name: el.name.clone(),
         control_type: uia::control_type_name(el.control_type),
-        center: (left + (right - left) / 2, top + (bottom - top) / 2),
+        center: element_center(el, (left, top, right, bottom)),
         bounding_box: (left, top, right, bottom),
         has_focus: el.has_keyboard_focus,
     })
+}
+
+/// The point to click for an element.
+///
+/// Prefers the provider's own clickable point, which is the only value that
+/// accounts for non-rectangular and partly covered controls. It is accepted
+/// only when it actually falls inside the element's bounds — some providers
+/// report a stale or out-of-bounds point — and otherwise the geometric
+/// center stands.
+fn element_center(el: &uia::RawElement, bounds: (i32, i32, i32, i32)) -> (i32, i32) {
+    let (left, top, right, bottom) = bounds;
+    if let Some((x, y)) = el.clickable_point
+        && x >= left
+        && x < right
+        && y >= top
+        && y < bottom
+    {
+        return (x, y);
+    }
+    (left + (right - left) / 2, top + (bottom - top) / 2)
 }
 
 fn inside_rect(el: &uia::RawElement, bounds: &windows::Win32::Foundation::RECT) -> bool {
@@ -776,6 +796,19 @@ pub(crate) fn capture(params: &SnapshotParams) -> Result<SnapshotResult, String>
             let mut local_scrollable: Vec<state::ElementNode> = Vec::new();
             let mut local_informative: Vec<state::ElementNode> = Vec::new();
 
+            // A provider can report bounds that extend past its own window
+            // (stale layout, or a control scrolled out of view). Clipping each
+            // node to the owner window keeps every center inside the window
+            // that will receive the click.
+            let owner_bounds = window::get_window_rect(win.handle).map(|(x, y, width, height)| {
+                windows::Win32::Foundation::RECT {
+                    left: x,
+                    top: y,
+                    right: x + width,
+                    bottom: y + height,
+                }
+            });
+
             let element_count = elements.len();
             let dom_root = if use_dom && win.is_browser() {
                 elements.iter().position(|el| {
@@ -825,7 +858,8 @@ pub(crate) fn capture(params: &SnapshotParams) -> Result<SnapshotResult, String>
                     element_index,
                     window_element_base,
                 )
-                .and_then(|node| clip_node_to_rect(node, selected_rect.as_ref())) else {
+                .and_then(|node| clip_node_to_rect(node, selected_rect.as_ref()))
+                .and_then(|node| clip_node_to_rect(node, owner_bounds.as_ref())) else {
                     continue;
                 };
                 let is_interactive_type = uia::INTERACTIVE_CONTROL_TYPES.contains(&el.control_type);
@@ -1298,6 +1332,58 @@ mod tests {
                 state::element_id(7, 1)
             )
         );
+    }
+
+    fn raw_element(rect: (i32, i32, i32, i32), clickable: Option<(i32, i32)>) -> uia::RawElement {
+        uia::RawElement {
+            parent_index: None,
+            runtime_id: Vec::new(),
+            supported_actions: Vec::new(),
+            control_type: 0,
+            name: "n".to_string(),
+            automation_id: String::new(),
+            rect: windows::Win32::Foundation::RECT {
+                left: rect.0,
+                top: rect.1,
+                right: rect.2,
+                bottom: rect.3,
+            },
+            is_enabled: true,
+            is_offscreen: false,
+            has_keyboard_focus: false,
+            is_modal: false,
+            is_scrollable: false,
+            vertical_scroll_percent: 0.0,
+            clickable_point: clickable,
+        }
+    }
+
+    #[test]
+    fn clickable_point_is_preferred_over_the_geometric_center() {
+        let bounds = (0, 0, 100, 40);
+        // No provider point: the geometric center stands.
+        assert_eq!(
+            element_center(&raw_element(bounds, None), bounds),
+            (50, 20)
+        );
+        // A provider point inside the element wins — this is the case where
+        // the center lands on a child or on padding.
+        assert_eq!(
+            element_center(&raw_element(bounds, Some((12, 30))), bounds),
+            (12, 30)
+        );
+    }
+
+    #[test]
+    fn an_out_of_bounds_clickable_point_falls_back_to_the_center() {
+        let bounds = (0, 0, 100, 40);
+        for stale in [(200, 20), (-5, 20), (50, 400)] {
+            assert_eq!(
+                element_center(&raw_element(bounds, Some(stale)), bounds),
+                (50, 20),
+                "stale point {stale:?} must not be trusted"
+            );
+        }
     }
 
     #[test]

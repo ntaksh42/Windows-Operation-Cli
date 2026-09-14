@@ -17,6 +17,12 @@ fn validate_label_point(node: state::ElementNode) -> Result<(i32, i32), String> 
     if !point_inside_rect(x, y, (owner_x, owner_y, owner_width, owner_height)) {
         return Err("Label owner window moved. Please call Snapshot again.".to_string());
     }
+    if window::is_point_occluded(x, y, node.owner_handle) {
+        return Err(format!(
+            "Element \"{}\" is covered by another window at ({x},{y}). Bring its window to the front (App switch) or call Snapshot again.",
+            node.name
+        ));
+    }
     Ok((x, y))
 }
 
