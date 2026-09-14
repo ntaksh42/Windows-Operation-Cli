@@ -24,7 +24,9 @@ After acting, re-observe (`Screenshot` is usually enough) to verify the effect b
 
 - **Element ids and labels are generation-scoped — and fail differently when stale.** A stale `element_id` from an older Snapshot errors out safely ("Element id N is stale"). A stale `label` does not: it silently indexes into the newest Snapshot's element list and may act on a completely different control. Re-read both from the latest Snapshot output; never carry them across Snapshots.
 - **Labels require a prior Snapshot.** `Click`/`Type` with `label` fails with "Desktop state is empty" until Snapshot has run at least once.
-- **Scale screenshot coordinates.** Screenshots may be downscaled (1920x1080 cap x `WINDOWS_MCP_SCREENSHOT_SCALE`). When the output reports an Original Size / Coordinate Scale, multiply image coordinates by the stated ratio before passing them to Click/Move/Type.
+- **Convert screenshot coordinates before acting on them.** Images may be downscaled (1920x1080 cap x `WINDOWS_MCP_SCREENSHOT_SCALE`), and the capture origin is not always (0, 0). Always apply the formula the output itself reports:
+  - `Screenshot Coordinate Scale: S` — multiply: `screen = (image_x × S, image_y × S)`.
+  - `Screenshot Coordinate Transform: screen = (origin_x + image_x × S, origin_y + image_y × S)` — apply the offset too. This appears whenever the capture starts at a non-zero desktop origin: a monitor left of or above the primary (where `origin_x`/`origin_y` are **negative** — keep the sign), or a `display`-restricted capture. Multiplying without the offset lands the click on the wrong monitor.
 - **UI state changes after every action.** Menus close, dialogs open, focus moves. Do not chain multiple coordinate-based actions from one old observation.
 - **`InvokeElement` falls back to clicking only when asked.** Pass `fallback_to_click=true` to allow a validated coordinate click when no semantic action is available; otherwise it errors.
 - **Timeout-bound Snapshot.** `timeout_ms` (default 2000, range 100-30000) bounds the UIA scan; on expiry the tree is truncated, not failed. Raise it for large windows, or narrow the scan with `window`.
@@ -43,6 +45,8 @@ After acting, re-observe (`Screenshot` is usually enough) to verify the effect b
 | Fetch a web page as Markdown | `Scrape` |
 | Registry / processes / clipboard / toast | `Registry` / `Process` / `Clipboard` / `Notification` |
 | Multi-monitor layout and DPI | `DisplayInventory` |
+| Verify caret / selected text after typing | `CaretInfo` |
+| Diagnose why automation fails at all (UIA, capture, shell) | `Doctor` |
 
 Prefer non-UI tools when they can do the job: editing a file with `FileSystem` or running `PowerShell` is faster and more reliable than driving Notepad through the UI.
 

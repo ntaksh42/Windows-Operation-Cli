@@ -4,12 +4,12 @@ Distilled from `src/server.rs` and `docs/SPEC.md`. Parameters marked `?` are opt
 
 ## Contents
 
-- [Observation: Screenshot, Snapshot, DisplayInventory](#observation)
+- [Observation: Screenshot, Snapshot, DisplayInventory, CursorPosition, CaretInfo](#observation)
 - [Element actions: InvokeElement, Click, Type, Scroll, Move, MultiSelect, MultiEdit](#element-actions)
 - [Keyboard: Shortcut](#keyboard)
 - [Synchronization: Wait, WaitFor](#synchronization)
 - [Apps and windows: App](#apps-and-windows)
-- [System: PowerShell, FileSystem, Registry, Process, Clipboard, Notification](#system)
+- [System: PowerShell, FileSystem, Registry, Process, Clipboard, Notification, Doctor](#system)
 - [Web: Scrape](#web)
 
 ## Observation
@@ -24,7 +24,12 @@ Fast capture: text summary + PNG. No UI tree.
 | width_reference_line / height_reference_line | int? | null | grid lines; both required to take effect |
 | display | [int]? | null | restrict capture to display indices (see DisplayInventory) |
 
-Output text includes cursor position, screenshot size, virtual-desktop and window tables. If the image was downscaled, it reports Original Size and a Coordinate Scale to multiply image coordinates by.
+Output text includes cursor position, screenshot size, virtual-desktop and window tables, plus the coordinate conversion to apply before passing image pixels to any `loc=` argument:
+
+- `Screenshot Coordinate Scale: S` (image downscaled) — `screen = (image_x × S, image_y × S)`.
+- `Screenshot Coordinate Transform: screen = (origin_x + image_x × S, origin_y + image_y × S)` — emitted when the capture origin is non-zero (a monitor left of/above the primary, or a `display`-restricted capture). `origin_x`/`origin_y` may be negative; preserve the sign. Scale alone is wrong here.
+
+Use whichever line the output actually reports.
 
 ### Snapshot
 
@@ -47,6 +52,16 @@ UI Tree lines look like `(x,y) controltype "name" [action: click]` with element 
 ### DisplayInventory
 
 No parameters. Returns per-display JSON: index, device, primary, bounds, work_area, resolution, orientation, effective_dpi, scale. The index matches Snapshot/Screenshot's `display` parameter.
+
+### CursorPosition
+
+No parameters. Returns `Cursor position: (x, y)` in screen coordinates — already real screen coordinates, so no scale/transform conversion applies.
+
+### CaretInfo
+
+No parameters. Returns the caret position, or up to 200 characters of selected text, from the focused UI Automation text element. Useful for verifying focus and content after `Type` without a full screenshot.
+
+Errors (not empty results) when the focused element does not support TextPattern, or returns no selection range — treat a failure as "focus is not in a text field", not as a tool fault.
 
 ## Element actions
 
@@ -217,6 +232,26 @@ set creates missing keys automatically.
 ### Notification
 
 `title`, `message`, `app_id` — all required. Sends a Windows toast.
+
+### Doctor
+
+No parameters. Returns environment diagnostics as JSON:
+
+```json
+{
+  "checks": {
+    "uia_com": true,            // UI Automation COM init succeeded
+    "monitor_count": 2,
+    "dxgi": true,               // DXGI screen capture available
+    "powershell": "pwsh.exe",   // resolved shell, or null if neither found
+    "administrator": false,     // elevated process
+    "virtual_desktop_api": true
+  },
+  "blockers": []                // human-readable strings; empty = healthy
+}
+```
+
+First thing to run when automation misbehaves for no obvious reason: a non-empty `blockers` array explains why Snapshot, Screenshot, or PowerShell cannot work at all. Always succeeds (never an error result), so the report itself is safe to request.
 
 ## Web
 
