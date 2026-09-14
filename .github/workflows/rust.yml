@@ -12,7 +12,10 @@ env:
 jobs:
   build:
 
-    runs-on: ubuntu-latest
+    # This crate is Windows-only: every dependency resolves to the Win32 and
+    # UI Automation APIs, so a Linux runner cannot build it (windows-future
+    # fails on windows_core::imp). Build and test on the platform it targets.
+    runs-on: windows-latest
 
     steps:
     - uses: actions/checkout@v4
