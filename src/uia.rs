@@ -708,3 +708,57 @@ unsafe fn collect_cached_children(
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod clickable_point_tests {
+    use super::*;
+
+    fn rect(width: i32, height: i32) -> RECT {
+        RECT {
+            left: 10,
+            top: 20,
+            right: 10 + width,
+            bottom: 20 + height,
+        }
+    }
+
+    #[test]
+    fn container_types_always_ask_the_provider() {
+        // These nest children over their own midpoint, so the geometric
+        // center is unreliable no matter how small the control is.
+        for control_type in [
+            UIA_ListItemControlTypeId,
+            UIA_MenuItemControlTypeId,
+            UIA_TabItemControlTypeId,
+            UIA_TreeItemControlTypeId,
+            UIA_ComboBoxControlTypeId,
+            UIA_SplitButtonControlTypeId,
+        ] {
+            assert!(
+                needs_clickable_point(control_type.0, &rect(40, 20)),
+                "{control_type:?} should ask for a clickable point"
+            );
+        }
+    }
+
+    #[test]
+    fn a_small_plain_button_uses_its_center() {
+        // The common case: skipping the cross-process call here is what keeps
+        // the cached walk cheap.
+        assert!(!needs_clickable_point(UIA_ButtonControlTypeId.0, &rect(80, 24)));
+    }
+
+    #[test]
+    fn a_large_control_asks_even_when_it_is_not_a_container() {
+        // Wide or tall controls put their center in padding or over a child.
+        assert!(needs_clickable_point(UIA_ButtonControlTypeId.0, &rect(200, 24)));
+        assert!(needs_clickable_point(UIA_ButtonControlTypeId.0, &rect(80, 200)));
+        assert!(!needs_clickable_point(UIA_ButtonControlTypeId.0, &rect(199, 199)));
+    }
+
+    #[test]
+    fn a_degenerate_rect_is_never_probed() {
+        assert!(!needs_clickable_point(UIA_ListItemControlTypeId.0, &rect(0, 20)));
+        assert!(!needs_clickable_point(UIA_ButtonControlTypeId.0, &rect(300, 0)));
+    }
+}
