@@ -374,8 +374,35 @@ pub fn chord(vks: &[u16], wait_after: Duration) -> Result<(), String> {
 pub fn send_unicode_char(ch: char) -> Result<(), String> {
     let mut buf = [0u16; 2];
     for unit in ch.encode_utf16(&mut buf) {
-        send_keyboard_input(VIRTUAL_KEY(*unit), KEYEVENTF_UNICODE)?;
-        send_keyboard_input(VIRTUAL_KEY(*unit), KEYEVENTF_UNICODE | KEYEVENTF_KEYUP)?;
+        send_unicode_unit(*unit, KEYEVENTF_UNICODE)?;
+        send_unicode_unit(*unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP)?;
+    }
+    Ok(())
+}
+
+/// Sends one UTF-16 code unit. `KEYEVENTF_UNICODE` requires the code unit in
+/// `wScan` with `wVk` left at 0: putting it in `wVk` makes Windows read it as a
+/// virtual-key code instead, so 'd' (U+0064 = VK_NUMPAD4) types "4", 'o'
+/// (U+006F = VK_DIVIDE) types "/", and 'A' (U+0041 = VK_A, no shift) types "a".
+fn send_unicode_unit(unit: u16, flags: KEYBD_EVENT_FLAGS) -> Result<(), String> {
+    let input = INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(0),
+                wScan: unit,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    let sent = unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) };
+    if sent != 1 {
+        return Err(format!(
+            "SendInput keyboard event was rejected: {}",
+            windows::core::Error::from_thread()
+        ));
     }
     Ok(())
 }
