@@ -319,6 +319,42 @@ fn format_tree_line(node: &state::ElementNode, action: &str) -> String {
     )
 }
 
+/// How far apart two same-named controls can sit and still be the same thing
+/// drawn twice. Measured against real pages, the stacked pairs land within a
+/// few pixels of each other (a list item and the link inside it differ by 4).
+const STACKED_NODE_TOLERANCE: i32 = 12;
+
+/// Removes elements that repeat a name already claimed at effectively the same
+/// place.
+///
+/// Web content routinely nests an interactive control inside a wrapper that
+/// carries the same accessible name — a `listitem` holding a `hyperlink`, a
+/// button inside its own group — and both satisfy the interactive filter. The
+/// model then sees two ids for one visible control and can pick the wrapper,
+/// which is not always the thing that responds to a click. Keep the first
+/// occurrence, which is the outermost element in document order and the one
+/// whose bounds the later duplicate sits inside.
+fn dedupe_stacked_nodes(nodes: &mut Vec<state::ElementNode>) {
+    let mut kept: Vec<(String, (i32, i32))> = Vec::with_capacity(nodes.len());
+    nodes.retain(|node| {
+        let name = node.name.trim();
+        if name.is_empty() {
+            return true;
+        }
+        let (x, y) = node.center;
+        let duplicate = kept.iter().any(|(kept_name, (kept_x, kept_y))| {
+            kept_name == name
+                && (kept_x - x).abs() <= STACKED_NODE_TOLERANCE
+                && (kept_y - y).abs() <= STACKED_NODE_TOLERANCE
+        });
+        if duplicate {
+            return false;
+        }
+        kept.push((name.to_string(), (x, y)));
+        true
+    });
+}
+
 fn format_informative_line(node: &state::ElementNode) -> String {
     format!(
         "({},{}) {} \"{}\"",
@@ -976,6 +1012,16 @@ pub(crate) fn capture(params: &SnapshotParams) -> Result<SnapshotResult, String>
                 }
             }
 
+            dedupe_stacked_nodes(&mut local_interactive);
+            local_informative.retain(|node| !node.name.trim().is_empty());
+            dedupe_stacked_nodes(&mut local_informative);
+            // Scrollable regions nest the same way interactive controls do —
+            // Chromium stacks a legacy-bridge pane and its document at one
+            // point — and an unnamed scroll region gives the model nothing to
+            // aim at that its parent does not already offer.
+            local_scrollable.retain(|node| !node.name.trim().is_empty());
+            dedupe_stacked_nodes(&mut local_scrollable);
+
             if !local_interactive.is_empty()
                 || !local_scrollable.is_empty()
                 || !local_informative.is_empty()
@@ -1221,6 +1267,61 @@ mod tests {
             class_name: "TestWindow".to_string(),
             pid: handle as u32,
         }
+    }
+
+    fn named_node(name: &str, control_type: &str, center: (i32, i32)) -> state::ElementNode {
+        state::ElementNode {
+            element_id: 0,
+            parent_id: None,
+            owner_handle: 0,
+            runtime_id: Vec::new(),
+            automation_id: String::new(),
+            supported_actions: Vec::new(),
+            name: name.to_string(),
+            control_type: control_type.to_string(),
+            center,
+            bounding_box: (center.0, center.1, center.0 + 1, center.1 + 1),
+            has_focus: false,
+        }
+    }
+
+    #[test]
+    fn a_control_wrapped_in_a_same_named_container_is_listed_once() {
+        // Measured on a real page: the list item and the link inside it carry
+        // the same name four pixels apart, and both passed the interactive
+        // filter.
+        let mut nodes = vec![
+            named_node("Code", "listitem", (127, 152)),
+            named_node("Code", "hyperlink", (127, 148)),
+            named_node("Issues", "listitem", (210, 152)),
+            named_node("Issues", "hyperlink", (210, 148)),
+        ];
+        dedupe_stacked_nodes(&mut nodes);
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].control_type, "listitem");
+        assert_eq!(nodes[1].name, "Issues");
+    }
+
+    #[test]
+    fn the_same_name_far_away_is_a_different_control() {
+        // "Code" also appears as a button elsewhere on the page; distance is
+        // what separates a repeated label from a stacked duplicate.
+        let mut nodes = vec![
+            named_node("Code", "listitem", (127, 152)),
+            named_node("Code", "button", (1230, 398)),
+        ];
+        dedupe_stacked_nodes(&mut nodes);
+        assert_eq!(nodes.len(), 2);
+    }
+
+    #[test]
+    fn unnamed_nodes_are_never_merged_together() {
+        let mut nodes = vec![
+            named_node("", "group", (100, 100)),
+            named_node("", "group", (101, 101)),
+        ];
+        dedupe_stacked_nodes(&mut nodes);
+        assert_eq!(nodes.len(), 2, "empty names carry no identity to match on");
     }
 
     #[test]
