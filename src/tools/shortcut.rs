@@ -26,6 +26,6 @@ pub fn shortcut(params: ShortcutParams) -> Result<String, String> {
         return Err("shortcut must not be empty".to_string());
     }
 
-    input_sim::chord(&vks, input_sim::input_settle_delay());
+    input_sim::chord(&vks, input_sim::input_settle_delay())?;
     Ok(format!("Pressed {}.", params.shortcut))
 }

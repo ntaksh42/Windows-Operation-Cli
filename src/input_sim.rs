@@ -19,8 +19,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetDoubleClickTime, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBD_EVENT_FLAGS, KEYBDINPUT,
     KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSE_EVENT_FLAGS, MOUSEEVENTF_ABSOLUTE,
     MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
-    MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEINPUT,
-    SendInput, VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_RETURN, VK_SHIFT, VK_TAB,
+    MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK,
+    MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput, VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_RETURN,
+    VK_SHIFT, VK_TAB,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetCursorPos, GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
@@ -64,7 +65,7 @@ impl ModifierGuard {
             "win" => VK_LWIN.0,
             _ => return Err("modifier must be one of: shift, ctrl, alt, win".to_string()),
         };
-        key_down(vk);
+        key_down(vk)?;
         Ok(Some(Self(vk)))
     }
 
@@ -75,7 +76,24 @@ impl ModifierGuard {
 
 impl Drop for ModifierGuard {
     fn drop(&mut self) {
-        key_up(self.0);
+        let _ = key_up(self.0);
+    }
+}
+
+/// A keyboard key held for a bounded input sequence. The key is released on
+/// every return path, including a failed subsequent input injection.
+pub struct KeyGuard(u16);
+
+impl KeyGuard {
+    pub fn press(vk: u16) -> Result<Self, String> {
+        key_down(vk)?;
+        Ok(Self(vk))
+    }
+}
+
+impl Drop for KeyGuard {
+    fn drop(&mut self) {
+        let _ = key_up(self.0);
     }
 }
 
@@ -89,10 +107,8 @@ pub fn get_cursor_pos() -> (i32, i32) {
 }
 
 /// Moves the cursor directly to `(x, y)` with no intermediate steps.
-pub fn set_cursor_pos(x: i32, y: i32) {
-    unsafe {
-        let _ = SetCursorPos(x, y);
-    }
+pub fn set_cursor_pos(x: i32, y: i32) -> Result<(), String> {
+    unsafe { SetCursorPos(x, y).map_err(|error| format!("SetCursorPos failed: {error}")) }
 }
 
 /// The system double-click time, in milliseconds.
@@ -123,7 +139,12 @@ fn normalize_absolute(x: i32, y: i32) -> (i32, i32) {
     (nx as i32, ny as i32)
 }
 
-fn send_mouse_input(flags: MOUSE_EVENT_FLAGS, dx: i32, dy: i32, mouse_data: i32) {
+fn send_mouse_input(
+    flags: MOUSE_EVENT_FLAGS,
+    dx: i32,
+    dy: i32,
+    mouse_data: i32,
+) -> Result<(), String> {
     let input = INPUT {
         r#type: INPUT_MOUSE,
         Anonymous: INPUT_0 {
@@ -137,9 +158,14 @@ fn send_mouse_input(flags: MOUSE_EVENT_FLAGS, dx: i32, dy: i32, mouse_data: i32)
             },
         },
     };
-    unsafe {
-        SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
+    let sent = unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) };
+    if sent != 1 {
+        return Err(format!(
+            "SendInput mouse event was rejected: {}",
+            windows::core::Error::from_thread()
+        ));
     }
+    Ok(())
 }
 
 fn mouse_button_flags(button: MouseButton, down: bool) -> MOUSE_EVENT_FLAGS {
@@ -153,38 +179,36 @@ fn mouse_button_flags(button: MouseButton, down: bool) -> MOUSE_EVENT_FLAGS {
     }
 }
 
+fn absolute_button_flags(button: MouseButton, down: bool) -> MOUSE_EVENT_FLAGS {
+    mouse_button_flags(button, down)
+        | MOUSEEVENTF_MOVE
+        | MOUSEEVENTF_ABSOLUTE
+        | MOUSEEVENTF_VIRTUALDESK
+}
+
 /// Presses `button` down at the cursor's current position.
-pub fn mouse_down(button: MouseButton) {
+pub fn mouse_down(button: MouseButton) -> Result<(), String> {
     let (x, y) = get_cursor_pos();
     let (nx, ny) = normalize_absolute(x, y);
-    send_mouse_input(
-        mouse_button_flags(button, true) | MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE,
-        nx,
-        ny,
-        0,
-    );
+    send_mouse_input(absolute_button_flags(button, true), nx, ny, 0)
 }
 
 /// Releases `button` at the cursor's current position.
-pub fn mouse_up(button: MouseButton) {
+pub fn mouse_up(button: MouseButton) -> Result<(), String> {
     let (x, y) = get_cursor_pos();
     let (nx, ny) = normalize_absolute(x, y);
-    send_mouse_input(
-        mouse_button_flags(button, false) | MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE,
-        nx,
-        ny,
-        0,
-    );
+    send_mouse_input(absolute_button_flags(button, false), nx, ny, 0)
 }
 
 /// A single click cycle at `(x, y)`: move, button down, a short gap, button
 /// up, then `wait_after`.
-pub fn click_once(x: i32, y: i32, button: MouseButton, wait_after: Duration) {
-    set_cursor_pos(x, y);
-    mouse_down(button);
+pub fn click_once(x: i32, y: i32, button: MouseButton, wait_after: Duration) -> Result<(), String> {
+    set_cursor_pos(x, y)?;
+    mouse_down(button)?;
     sleep(Duration::from_millis(50));
-    mouse_up(button);
+    mouse_up(button)?;
     sleep(wait_after);
+    Ok(())
 }
 
 /// Maximum duration (seconds) `move_smooth` allows itself at `move_speed == 1`.
@@ -192,7 +216,7 @@ const MAX_MOVE_SECOND: f64 = 1.0;
 
 /// Smoothly moves the cursor to `(x, y)` in stepped `SetCursorPos` calls,
 /// porting the pacing algorithm from the Python reference's `uia.MoveTo`.
-pub fn move_smooth(x: i32, y: i32, move_speed: f64, wait_after: Duration) {
+pub fn move_smooth(x: i32, y: i32, move_speed: f64, wait_after: Duration) -> Result<(), String> {
     let mut move_time = if move_speed > 0.0 {
         MAX_MOVE_SECOND / move_speed
     } else {
@@ -222,24 +246,30 @@ pub fn move_smooth(x: i32, y: i32, move_speed: f64, wait_after: Duration) {
         for i in 0..step_count {
             let cx = cur_x + (x_step * i as f64) as i32;
             let cy = cur_y + (y_step * i as f64) as i32;
-            set_cursor_pos(cx, cy);
+            set_cursor_pos(cx, cy)?;
             if interval > 0.0 {
                 sleep(Duration::from_secs_f64(interval));
             }
         }
     }
-    set_cursor_pos(x, y);
+    set_cursor_pos(x, y)?;
     sleep(wait_after);
+    Ok(())
 }
 
 /// Moves the cursor to `(x, y)` over exactly `duration` seconds via linear
 /// interpolation, capped at 200 steps (10ms each). Ports `uia.MoveToDuration`.
-pub fn move_smooth_duration(x: i32, y: i32, duration: f64, wait_after: Duration) {
+pub fn move_smooth_duration(
+    x: i32,
+    y: i32,
+    duration: f64,
+    wait_after: Duration,
+) -> Result<(), String> {
     let (cur_x, cur_y) = get_cursor_pos();
     if duration <= 0.0 {
-        set_cursor_pos(x, y);
+        set_cursor_pos(x, y)?;
         sleep(wait_after);
-        return;
+        return Ok(());
     }
     let step_count = ((duration / 0.01).ceil() as i64).clamp(2, 200);
     let interval = duration / step_count as f64;
@@ -247,29 +277,31 @@ pub fn move_smooth_duration(x: i32, y: i32, duration: f64, wait_after: Duration)
         let ratio = i as f64 / step_count as f64;
         let cx = cur_x + ((x - cur_x) as f64 * ratio).round() as i32;
         let cy = cur_y + ((y - cur_y) as f64 * ratio).round() as i32;
-        set_cursor_pos(cx, cy);
+        set_cursor_pos(cx, cy)?;
         sleep(Duration::from_secs_f64(interval));
     }
     sleep(wait_after);
+    Ok(())
 }
 
 /// Spins the mouse wheel `notches` times (positive = up, negative = down),
 /// waiting `interval` between notches and `wait_after` once all notches have
 /// been sent.
-pub fn wheel(notches: i32, interval: Duration, wait_after: Duration) {
+pub fn wheel(notches: i32, interval: Duration, wait_after: Duration) -> Result<(), String> {
     let delta = if notches >= 0 {
         WHEEL_DELTA
     } else {
         -WHEEL_DELTA
     };
     for _ in 0..notches.unsigned_abs() {
-        send_mouse_input(MOUSEEVENTF_WHEEL, 0, 0, delta);
+        send_mouse_input(MOUSEEVENTF_WHEEL, 0, 0, delta)?;
         sleep(interval);
     }
     sleep(wait_after);
+    Ok(())
 }
 
-fn send_keyboard_input(vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS) {
+fn send_keyboard_input(vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS) -> Result<(), String> {
     let input = INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
@@ -282,69 +314,92 @@ fn send_keyboard_input(vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS) {
             },
         },
     };
-    unsafe {
-        SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
+    let sent = unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) };
+    if sent != 1 {
+        return Err(format!(
+            "SendInput keyboard event was rejected: {}",
+            windows::core::Error::from_thread()
+        ));
     }
+    Ok(())
 }
 
 /// Presses a virtual-key code down (does not release it).
-pub fn key_down(vk: u16) {
-    send_keyboard_input(VIRTUAL_KEY(vk), KEYBD_EVENT_FLAGS(0));
+pub fn key_down(vk: u16) -> Result<(), String> {
+    send_keyboard_input(VIRTUAL_KEY(vk), KEYBD_EVENT_FLAGS(0))
 }
 
 /// Releases a virtual-key code.
-pub fn key_up(vk: u16) {
-    send_keyboard_input(VIRTUAL_KEY(vk), KEYEVENTF_KEYUP);
+pub fn key_up(vk: u16) -> Result<(), String> {
+    send_keyboard_input(VIRTUAL_KEY(vk), KEYEVENTF_KEYUP)
 }
 
 /// Presses and releases a virtual-key code, waiting `wait_after` afterward.
-pub fn key_tap(vk: u16, wait_after: Duration) {
-    key_down(vk);
-    key_up(vk);
+pub fn key_tap(vk: u16, wait_after: Duration) -> Result<(), String> {
+    key_down(vk)?;
+    key_up(vk)?;
     sleep(wait_after);
+    Ok(())
 }
 
 /// Presses `vks` down together, in order, holds briefly, then releases them
 /// in reverse order — a simultaneous chord (e.g. Ctrl+Shift+Esc) — waiting
 /// `wait_after` once everything has been released.
-pub fn chord(vks: &[u16], wait_after: Duration) {
+pub fn chord(vks: &[u16], wait_after: Duration) -> Result<(), String> {
+    let mut pressed = Vec::with_capacity(vks.len());
     for &vk in vks {
-        key_down(vk);
+        if let Err(error) = key_down(vk) {
+            for &pressed_vk in pressed.iter().rev() {
+                let _ = key_up(pressed_vk);
+            }
+            return Err(error);
+        }
+        pressed.push(vk);
         sleep(Duration::from_millis(10));
     }
     sleep(Duration::from_millis(10));
-    for &vk in vks.iter().rev() {
-        key_up(vk);
+    let mut release_error = None;
+    for &vk in pressed.iter().rev() {
+        if let Err(error) = key_up(vk) {
+            release_error.get_or_insert(error);
+        }
         sleep(Duration::from_millis(10));
     }
     sleep(wait_after);
+    release_error.map_or(Ok(()), Err)
 }
 
 /// Sends a single Unicode character via `KEYEVENTF_UNICODE`, bypassing
 /// keyboard-layout translation entirely.
-pub fn send_unicode_char(ch: char) {
+pub fn send_unicode_char(ch: char) -> Result<(), String> {
     let mut buf = [0u16; 2];
     for unit in ch.encode_utf16(&mut buf) {
-        send_keyboard_input(VIRTUAL_KEY(*unit), KEYEVENTF_UNICODE);
-        send_keyboard_input(VIRTUAL_KEY(*unit), KEYEVENTF_UNICODE | KEYEVENTF_KEYUP);
+        send_keyboard_input(VIRTUAL_KEY(*unit), KEYEVENTF_UNICODE)?;
+        send_keyboard_input(VIRTUAL_KEY(*unit), KEYEVENTF_UNICODE | KEYEVENTF_KEYUP)?;
     }
+    Ok(())
 }
 
 /// Types `text` one character at a time, waiting `interval` between
 /// characters. `\n` and `\t` are sent as Enter/Tab key taps (so form
 /// navigation still works); `\r` is skipped; everything else goes through
 /// `send_unicode_char`.
-pub fn type_text_char_by_char(text: &str, interval: Duration, wait_after: Duration) {
+pub fn type_text_char_by_char(
+    text: &str,
+    interval: Duration,
+    wait_after: Duration,
+) -> Result<(), String> {
     for ch in text.chars() {
         match ch {
-            '\n' => key_tap(VK_RETURN.0, Duration::ZERO),
-            '\t' => key_tap(VK_TAB.0, Duration::ZERO),
+            '\n' => key_tap(VK_RETURN.0, Duration::ZERO)?,
+            '\t' => key_tap(VK_TAB.0, Duration::ZERO)?,
             '\r' => {}
-            other => send_unicode_char(other),
+            other => send_unicode_char(other)?,
         }
         sleep(interval);
     }
     sleep(wait_after);
+    Ok(())
 }
 
 /// Reads CF_UNICODETEXT from the clipboard, if present.
@@ -455,5 +510,13 @@ mod tests {
         assert_eq!(input_settle_delay(), Duration::from_millis(50));
 
         unsafe { std::env::remove_var("WINDOWS_MCP_INPUT_SETTLE_MS") };
+    }
+
+    #[test]
+    fn absolute_clicks_target_the_virtual_desktop() {
+        let flags = absolute_button_flags(MouseButton::Left, true);
+        assert!(flags.contains(MOUSEEVENTF_ABSOLUTE));
+        assert!(flags.contains(MOUSEEVENTF_VIRTUALDESK));
+        assert!(flags.contains(MOUSEEVENTF_LEFTDOWN));
     }
 }

@@ -96,54 +96,50 @@ pub fn scroll(params: ScrollParams) -> Result<String, String> {
     let modifier = input_sim::ModifierGuard::press(params.modifier.as_deref())?;
 
     if let Some((x, y)) = point {
-        input_sim::set_cursor_pos(x, y);
+        input_sim::set_cursor_pos(x, y)?;
         std::thread::sleep(input_sim::input_settle_delay());
     }
 
     match (scroll_type, direction) {
         (ScrollType::Vertical, ScrollDirection::Up) => {
-            input_sim::wheel(wheel_times, NOTCH_INTERVAL, input_sim::input_settle_delay());
+            input_sim::wheel(wheel_times, NOTCH_INTERVAL, input_sim::input_settle_delay())?;
         }
         (ScrollType::Vertical, ScrollDirection::Down) => {
             input_sim::wheel(
                 -wheel_times,
                 NOTCH_INTERVAL,
                 input_sim::input_settle_delay(),
-            );
+            )?;
         }
         (ScrollType::Vertical, _) => unreachable!("direction validated above"),
         (ScrollType::Horizontal, ScrollDirection::Left) => {
             let shift_already_held = modifier
                 .as_ref()
                 .is_some_and(|guard| guard.virtual_key() == VK_SHIFT.0);
-            if !shift_already_held {
-                input_sim::key_down(VK_SHIFT.0);
-            }
+            let shift = (!shift_already_held)
+                .then(|| input_sim::KeyGuard::press(VK_SHIFT.0))
+                .transpose()?;
             std::thread::sleep(SHIFT_KEY_WAIT);
-            input_sim::wheel(wheel_times, NOTCH_INTERVAL, input_sim::input_settle_delay());
+            input_sim::wheel(wheel_times, NOTCH_INTERVAL, input_sim::input_settle_delay())?;
             std::thread::sleep(NOTCH_INTERVAL);
-            if !shift_already_held {
-                input_sim::key_up(VK_SHIFT.0);
-            }
+            drop(shift);
             std::thread::sleep(SHIFT_KEY_WAIT);
         }
         (ScrollType::Horizontal, ScrollDirection::Right) => {
             let shift_already_held = modifier
                 .as_ref()
                 .is_some_and(|guard| guard.virtual_key() == VK_SHIFT.0);
-            if !shift_already_held {
-                input_sim::key_down(VK_SHIFT.0);
-            }
+            let shift = (!shift_already_held)
+                .then(|| input_sim::KeyGuard::press(VK_SHIFT.0))
+                .transpose()?;
             std::thread::sleep(SHIFT_KEY_WAIT);
             input_sim::wheel(
                 -wheel_times,
                 NOTCH_INTERVAL,
                 input_sim::input_settle_delay(),
-            );
+            )?;
             std::thread::sleep(NOTCH_INTERVAL);
-            if !shift_already_held {
-                input_sim::key_up(VK_SHIFT.0);
-            }
+            drop(shift);
             std::thread::sleep(SHIFT_KEY_WAIT);
         }
         (ScrollType::Horizontal, _) => unreachable!("direction validated above"),

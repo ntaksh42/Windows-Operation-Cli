@@ -17,7 +17,7 @@ struct LeftButtonGuard;
 
 impl Drop for LeftButtonGuard {
     fn drop(&mut self) {
-        input_sim::mouse_up(MouseButton::Left);
+        let _ = input_sim::mouse_up(MouseButton::Left);
     }
 }
 
@@ -71,20 +71,20 @@ pub fn move_mouse(params: MoveParams) -> Result<String, String> {
     }
 
     if !drag {
-        input_sim::set_cursor_pos(x, y);
+        input_sim::set_cursor_pos(x, y)?;
         std::thread::sleep(input_sim::input_settle_delay());
         return Ok(format!("Moved the mouse pointer to ({x},{y})."));
     }
 
     let (start_x, start_y) = from_loc.unwrap_or_else(input_sim::get_cursor_pos);
 
-    input_sim::set_cursor_pos(start_x, start_y);
-    input_sim::mouse_down(MouseButton::Left);
+    input_sim::set_cursor_pos(start_x, start_y)?;
+    input_sim::mouse_down(MouseButton::Left)?;
     let button_guard = LeftButtonGuard;
     std::thread::sleep(DRAG_START_WAIT);
     match params.duration {
-        Some(duration) => input_sim::move_smooth_duration(x, y, duration, DRAG_START_WAIT),
-        None => input_sim::move_smooth(x, y, 1.0, DRAG_START_WAIT),
+        Some(duration) => input_sim::move_smooth_duration(x, y, duration, DRAG_START_WAIT)?,
+        None => input_sim::move_smooth(x, y, 1.0, DRAG_START_WAIT)?,
     }
     drop(button_guard);
     std::thread::sleep(input_sim::input_settle_delay());

@@ -51,16 +51,17 @@ pub fn multi_select(params: MultiSelectParams) -> Result<String, String> {
 
     let press_ctrl = opt_bool(&params.press_ctrl, true)?;
 
-    if press_ctrl {
-        input_sim::key_down(VK_CONTROL.0);
+    let ctrl = if press_ctrl {
+        let guard = input_sim::KeyGuard::press(VK_CONTROL.0)?;
         std::thread::sleep(CTRL_KEY_WAIT);
-    }
+        Some(guard)
+    } else {
+        None
+    };
     for &(x, y) in &points {
-        input_sim::click_once(x, y, MouseButton::Left, input_sim::input_settle_delay());
+        input_sim::click_once(x, y, MouseButton::Left, input_sim::input_settle_delay())?;
     }
-    // Ctrl is always released, even if it was never pressed (matches the
-    // Python reference's unconditional ReleaseKey call).
-    input_sim::key_up(VK_CONTROL.0);
+    drop(ctrl);
     std::thread::sleep(CTRL_KEY_WAIT);
 
     let elements: Vec<String> = points.iter().map(|(x, y)| format!("({x},{y})")).collect();

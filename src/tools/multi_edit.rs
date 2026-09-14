@@ -42,7 +42,7 @@ pub fn multi_edit(params: MultiEditParams) -> Result<String, String> {
     }
 
     for &(x, y, ref text) in &entries {
-        typing::type_at(x, y, text, CaretPosition::Idle, true, false);
+        typing::type_at(x, y, text, CaretPosition::Idle, true, false)?;
     }
 
     let elements: Vec<String> = entries

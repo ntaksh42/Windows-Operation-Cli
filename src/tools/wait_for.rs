@@ -7,7 +7,6 @@ use rmcp::schemars;
 use serde::Deserialize;
 
 use crate::params::{BoolOrString, opt_bool};
-use crate::state;
 use crate::tools::snapshot::{self, SnapshotParams};
 
 const MIN_TIMEOUT: f64 = 0.0;
@@ -187,6 +186,11 @@ fn active_window_match(params: &WaitForParams, title: &str) -> Option<String> {
     casefold_contains(title, needle).then(|| format!("active window '{title}' matches '{needle}'"))
 }
 
+fn snapshot_timeout_ms(remaining: Duration) -> Option<u64> {
+    (remaining >= Duration::from_millis(100))
+        .then(|| remaining.as_millis().clamp(100, 30_000) as u64)
+}
+
 fn wait_for_active_window(
     params: &WaitForParams,
     timeout: f64,
@@ -263,10 +267,10 @@ pub fn wait_for(params: WaitForParams) -> Result<String, String> {
         return wait_for_active_window(&params, timeout, interval);
     }
 
-    let snapshot_params = SnapshotParams {
+    let mut snapshot_params = SnapshotParams {
         scope: None,
         window: None,
-        timeout_ms: None,
+        timeout_ms: Some(100),
         use_vision: Some(BoolOrString::Bool(false)),
         use_dom: Some(BoolOrString::Bool(use_dom)),
         use_annotation: Some(BoolOrString::Bool(false)),
@@ -280,9 +284,18 @@ pub fn wait_for(params: WaitForParams) -> Result<String, String> {
     let mut attempt: u32 = 0;
     loop {
         attempt += 1;
+        let remaining = Duration::from_secs_f64(timeout).saturating_sub(started.elapsed());
+        let Some(snapshot_timeout_ms) = snapshot_timeout_ms(remaining) else {
+            let elapsed = started.elapsed().as_secs_f64();
+            return Err(format!(
+                "Timed out after {elapsed:.2}s waiting for '{}': {}.",
+                params.condition,
+                timeout_hint(condition, &params)
+            ));
+        };
+        snapshot_params.timeout_ms = Some(snapshot_timeout_ms);
         if let Ok(result) = snapshot::capture(&snapshot_params) {
             let matched = evaluate_condition(condition, &params, &result);
-            state::set_state(result.to_desktop_state());
             if let Some(detail) = matched {
                 let elapsed = started.elapsed().as_secs_f64();
                 return Ok(format!(
@@ -400,5 +413,12 @@ mod tests {
             Some("active window 'Windows Settings' matches 'SETTINGS'".to_string())
         );
         assert_eq!(active_window_match(&params, "File Explorer"), None);
+    }
+
+    #[test]
+    fn snapshot_poll_budget_never_exceeds_remaining_timeout() {
+        assert_eq!(snapshot_timeout_ms(Duration::from_millis(99)), None);
+        assert_eq!(snapshot_timeout_ms(Duration::from_millis(100)), Some(100));
+        assert_eq!(snapshot_timeout_ms(Duration::from_secs(45)), Some(30_000));
     }
 }

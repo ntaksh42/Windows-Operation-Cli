@@ -100,7 +100,8 @@ fn click_lands_within_two_pixels() {
         origin.y + expected.1,
         input_sim::MouseButton::Left,
         Duration::ZERO,
-    );
+    )
+    .unwrap();
     let actual = click_rx.recv_timeout(Duration::from_secs(3)).unwrap();
     assert!((actual.0 - expected.0).abs() <= 2, "x: {actual:?}");
     assert!((actual.1 - expected.1).abs() <= 2, "y: {actual:?}");
