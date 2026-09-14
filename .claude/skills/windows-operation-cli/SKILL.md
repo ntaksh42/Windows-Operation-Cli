@@ -1,9 +1,9 @@
 ---
-name: windows-computeruse
-description: Operate the Windows desktop via the windows-computeruse MCP server. Use whenever a task touches the Windows UI or local system - launching apps, clicking, typing, reading the screen, waiting for windows, managing files/registry/processes/clipboard - even when the user does not name the server.
+name: windows-operation-cli
+description: Operate the Windows desktop via the windows-operation-cli MCP server. Use whenever a task touches the Windows UI or local system - launching apps, clicking, typing, reading the screen, waiting for windows, managing files/registry/processes/clipboard - even when the user does not name the server.
 ---
 
-# Windows-ComputerUse MCP Server
+# Windows-Operation-Cli MCP Server
 
 Rust MCP server for Windows desktop automation. Core loop: **observe → act → synchronize**, repeated until the task's goal is verified on screen.
 

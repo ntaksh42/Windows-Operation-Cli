@@ -1,4 +1,4 @@
-# Windows-ComputerUse — ツール仕様書（Python 版 Windows-MCP から抽出）
+# Windows-Operation-Cli — ツール仕様書（Python 版 Windows-MCP から抽出）
 
 Rust 再実装の基準仕様。元実装: E:\Windows-MCP\src\windows_mcp\
 

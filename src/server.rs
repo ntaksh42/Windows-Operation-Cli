@@ -67,10 +67,10 @@ fn text_succeeded(message: &str) -> bool {
 
 /// MCP server exposing Windows desktop automation tools.
 #[derive(Debug, Clone)]
-pub struct WindowsComputerUseServer;
+pub struct WindowsOperationCliServer;
 
 #[tool_router]
-impl WindowsComputerUseServer {
+impl WindowsOperationCliServer {
     #[tool(
         name = "InvokeElement",
         description = "Invokes a structured UI element id from the most recent Snapshot using UI Automation semantics. Set fallback_to_click=true to explicitly allow a validated coordinate click when no semantic action is available."
@@ -479,7 +479,7 @@ impl WindowsComputerUseServer {
 // bakes in `env!("CARGO_CRATE_NAME")` from rmcp's own build, not this crate's,
 // so the server would otherwise report itself as "rmcp".
 #[tool_handler(
-    name = "windows-computeruse",
+    name = "windows-operation-cli",
     instructions = "Windows desktop automation MCP server."
 )]
-impl ServerHandler for WindowsComputerUseServer {}
+impl ServerHandler for WindowsOperationCliServer {}
