@@ -6,17 +6,17 @@
 
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT};
+use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, POINT, RECT};
 use windows::Win32::System::Threading::{
     AttachThreadInput, GetCurrentThreadId, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     QueryFullProcessImageNameW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    ASFW_ANY, AllowSetForegroundWindow, BringWindowToTop, EnumWindows, FindWindowW, GetClassNameW,
-    GetForegroundWindow, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
-    GetWindowThreadProcessId, HWND_TOP, IsIconic, IsWindow, IsWindowVisible, IsZoomed, MoveWindow,
-    SW_RESTORE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SetForegroundWindow, SetWindowPos,
-    ShowWindow,
+    ASFW_ANY, AllowSetForegroundWindow, BringWindowToTop, EnumWindows, FindWindowW, GA_ROOT,
+    GetAncestor, GetClassNameW, GetForegroundWindow, GetWindowRect, GetWindowTextLengthW,
+    GetWindowTextW, GetWindowThreadProcessId, HWND_TOP, IsIconic, IsWindow, IsWindowVisible,
+    IsZoomed, MoveWindow, SW_RESTORE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SetForegroundWindow,
+    SetWindowPos, ShowWindow, WindowFromPoint,
 };
 use windows::core::{BOOL, PCWSTR, PWSTR};
 
@@ -111,7 +111,21 @@ pub struct SnapshotWindow {
 }
 
 impl SnapshotWindow {
+    /// Whether this window hosts web content whose DOM can be walked.
+    ///
+    /// Chromium hands every renderer window the `Chrome_WidgetWin_1` class,
+    /// so the class covers Chrome and Edge along with the Electron apps built
+    /// on the same engine (VS Code, Slack, Discord) — all of which expose
+    /// their page through the same Document root. Matching on the class
+    /// instead of an executable allowlist keeps Electron working without
+    /// naming each app. Firefox uses its own class and is listed explicitly.
     pub fn is_browser(&self) -> bool {
+        if matches!(
+            self.class_name.as_str(),
+            "Chrome_WidgetWin_1" | "MozillaWindowClass"
+        ) {
+            return true;
+        }
         process_executable_name(self.pid).is_some_and(|name| {
             matches!(name.as_str(), "chrome.exe" | "msedge.exe" | "firefox.exe")
         })
@@ -203,6 +217,37 @@ pub fn list_snapshot_windows() -> Vec<SnapshotWindow> {
 /// Reads a window's current screen bounds as `(x, y, width, height)`.
 pub fn get_window_rect(handle: isize) -> Option<(i32, i32, i32, i32)> {
     window_rect(handle)
+}
+
+/// Whether `(x, y)` is covered by a window belonging to a different top-level
+/// window than `owner_handle`.
+///
+/// UI Automation reports an element's bounds regardless of what is drawn on
+/// top of it, so a control behind another window still looks clickable. A
+/// click there lands on whatever is in front. `WindowFromPoint` returns the
+/// window that would actually receive the click; anything in `owner_handle`'s
+/// own top-level chain (its child controls) counts as the owner itself.
+pub fn is_point_occluded(x: i32, y: i32, owner_handle: isize) -> bool {
+    unsafe {
+        let hit = WindowFromPoint(POINT { x, y });
+        if hit.0.is_null() {
+            // Nothing there to intercept the click; treat it as reachable and
+            // let the existing bounds checks decide.
+            return false;
+        }
+        let owner = HWND(owner_handle as *mut _);
+        if hit == owner {
+            return false;
+        }
+        // A hit on one of the owner's own controls resolves to the same
+        // top-level window.
+        let hit_root = GetAncestor(hit, GA_ROOT);
+        let owner_root = GetAncestor(owner, GA_ROOT);
+        if !hit_root.0.is_null() && hit_root == owner_root {
+            return false;
+        }
+        true
+    }
 }
 
 /// Finds the best fuzzy-name match (score_cutoff 70) among currently open windows.
@@ -353,5 +398,52 @@ pub fn wait_for_window(pid: Option<u32>, name: &str, timeout: Duration) -> bool 
             return false;
         }
         std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+#[cfg(test)]
+mod occlusion_tests {
+    use super::*;
+
+    #[test]
+    fn a_point_over_another_application_is_occluded() {
+        // The foreground window owns whatever is drawn at its own center, so
+        // any other top-level window claiming that point is behind it.
+        let Some(foreground) = foreground_window() else {
+            return; // no interactive desktop
+        };
+        let Some((x, y, width, height)) = get_window_rect(foreground.handle) else {
+            return;
+        };
+        let (cx, cy) = (x + width / 2, y + height / 2);
+
+        // The foreground window itself is never occluded at its own center.
+        assert!(
+            !is_point_occluded(cx, cy, foreground.handle),
+            "the foreground window must own its own center"
+        );
+
+        // A different top-level window claiming that same point is occluded.
+        let other = list_windows()
+            .into_iter()
+            .find(|w| w.handle != foreground.handle);
+        if let Some(other) = other {
+            assert!(
+                is_point_occluded(cx, cy, other.handle),
+                "a background window must not be treated as clickable where the foreground window covers it"
+            );
+        }
+    }
+
+    #[test]
+    fn a_closed_or_bogus_owner_is_reported_as_occluded() {
+        // An owner handle that no longer resolves cannot own the point.
+        let Some(foreground) = foreground_window() else {
+            return;
+        };
+        let Some((x, y, width, height)) = get_window_rect(foreground.handle) else {
+            return;
+        };
+        assert!(is_point_occluded(x + width / 2, y + height / 2, 1));
     }
 }

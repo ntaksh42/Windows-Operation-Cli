@@ -73,24 +73,48 @@ fn select_scan_targets<'a>(
 ) -> Result<Vec<&'a window::SnapshotWindow>, String> {
     if let Some(query) = options.window.as_deref() {
         let query = query.to_lowercase();
+        // Window titles carry document names, counts, and the application
+        // name ("repo and 6 more pages - Personal - Microsoft Edge"), so a
+        // caller names the part they know. Whole-string `ratio` scores such a
+        // query by how much of the title it fails to cover, which put even a
+        // verbatim prefix of a long title under the cutoff. Score by the best
+        // matching window of the title instead, keeping `ratio` so a query
+        // that does span the whole title still wins over a partial hit.
         let mut scored: Vec<_> = windows
             .iter()
             .map(|candidate| {
-                (
-                    candidate,
-                    crate::fuzzy::ratio(&query, &candidate.title.to_lowercase()),
-                )
+                let title = candidate.title.to_lowercase();
+                let mut score = crate::fuzzy::ratio(&query, &title);
+                // `partial_ratio` slides the shorter string across the longer
+                // one, so a title shorter than the query scores 100 whenever
+                // the title appears anywhere in it — "Claude" would beat
+                // "Claude Settings" for the query "Claude Settings". Trust it
+                // only when the query is the shorter side, which is the case
+                // it exists for: naming part of a long title.
+                if query.chars().count() <= title.chars().count() {
+                    score = score.max(crate::fuzzy::partial_ratio(&query, &title));
+                }
+                (candidate, score)
             })
             .filter(|(_, score)| *score >= 70.0)
             .collect();
-        scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+        // Partial matching scores every title containing the query at 100, so
+        // ties are now common ("GitHub" against two open tabs). Prefer the
+        // shortest title among equals: it is the one the query covers most of,
+        // and therefore the closest thing to what was asked for. Only a tie on
+        // both score and length is genuinely ambiguous.
+        scored.sort_by(|a, b| {
+            b.1.total_cmp(&a.1)
+                .then_with(|| a.0.title.chars().count().cmp(&b.0.title.chars().count()))
+        });
         let Some((best, best_score)) = scored.first() else {
             return Err(format!("Window not found: {query}"));
         };
-        if scored
-            .get(1)
-            .is_some_and(|(_, score)| (*score - *best_score).abs() < f64::EPSILON)
-        {
+        let best_len = best.title.chars().count();
+        if scored.get(1).is_some_and(|(candidate, score)| {
+            (*score - *best_score).abs() < f64::EPSILON
+                && candidate.title.chars().count() == best_len
+        }) {
             return Err(format!("Window query is ambiguous: {query}"));
         }
         let mut application_windows = vec![*best];
@@ -295,6 +319,42 @@ fn format_tree_line(node: &state::ElementNode, action: &str) -> String {
     )
 }
 
+/// How far apart two same-named controls can sit and still be the same thing
+/// drawn twice. Measured against real pages, the stacked pairs land within a
+/// few pixels of each other (a list item and the link inside it differ by 4).
+const STACKED_NODE_TOLERANCE: i32 = 12;
+
+/// Removes elements that repeat a name already claimed at effectively the same
+/// place.
+///
+/// Web content routinely nests an interactive control inside a wrapper that
+/// carries the same accessible name — a `listitem` holding a `hyperlink`, a
+/// button inside its own group — and both satisfy the interactive filter. The
+/// model then sees two ids for one visible control and can pick the wrapper,
+/// which is not always the thing that responds to a click. Keep the first
+/// occurrence, which is the outermost element in document order and the one
+/// whose bounds the later duplicate sits inside.
+fn dedupe_stacked_nodes(nodes: &mut Vec<state::ElementNode>) {
+    let mut kept: Vec<(String, (i32, i32))> = Vec::with_capacity(nodes.len());
+    nodes.retain(|node| {
+        let name = node.name.trim();
+        if name.is_empty() {
+            return true;
+        }
+        let (x, y) = node.center;
+        let duplicate = kept.iter().any(|(kept_name, (kept_x, kept_y))| {
+            kept_name == name
+                && (kept_x - x).abs() <= STACKED_NODE_TOLERANCE
+                && (kept_y - y).abs() <= STACKED_NODE_TOLERANCE
+        });
+        if duplicate {
+            return false;
+        }
+        kept.push((name.to_string(), (x, y)));
+        true
+    });
+}
+
 fn format_informative_line(node: &state::ElementNode) -> String {
     format!(
         "({},{}) {} \"{}\"",
@@ -324,10 +384,30 @@ fn raw_to_node(
         supported_actions: el.supported_actions.clone(),
         name: el.name.clone(),
         control_type: uia::control_type_name(el.control_type),
-        center: (left + (right - left) / 2, top + (bottom - top) / 2),
+        center: element_center(el, (left, top, right, bottom)),
         bounding_box: (left, top, right, bottom),
         has_focus: el.has_keyboard_focus,
     })
+}
+
+/// The point to click for an element.
+///
+/// Prefers the provider's own clickable point, which is the only value that
+/// accounts for non-rectangular and partly covered controls. It is accepted
+/// only when it actually falls inside the element's bounds — some providers
+/// report a stale or out-of-bounds point — and otherwise the geometric
+/// center stands.
+fn element_center(el: &uia::RawElement, bounds: (i32, i32, i32, i32)) -> (i32, i32) {
+    let (left, top, right, bottom) = bounds;
+    if let Some((x, y)) = el.clickable_point
+        && x >= left
+        && x < right
+        && y >= top
+        && y < bottom
+    {
+        return (x, y);
+    }
+    (left + (right - left) / 2, top + (bottom - top) / 2)
 }
 
 fn inside_rect(el: &uia::RawElement, bounds: &windows::Win32::Foundation::RECT) -> bool {
@@ -776,16 +856,59 @@ pub(crate) fn capture(params: &SnapshotParams) -> Result<SnapshotResult, String>
             let mut local_scrollable: Vec<state::ElementNode> = Vec::new();
             let mut local_informative: Vec<state::ElementNode> = Vec::new();
 
+            // A provider can report bounds that extend past its own window
+            // (stale layout, or a control scrolled out of view). Clipping each
+            // node to the owner window keeps every center inside the window
+            // that will receive the click.
+            let owner_bounds = window::get_window_rect(win.handle).map(|(x, y, width, height)| {
+                windows::Win32::Foundation::RECT {
+                    left: x,
+                    top: y,
+                    right: x + width,
+                    bottom: y + height,
+                }
+            });
+
             let element_count = elements.len();
+            // Every Chromium-family renderer (Chrome, Edge, and the Electron
+            // shells built on them) and Firefox expose the page as a Document
+            // element. An earlier `automation_id == "RootWebArea"` probe never
+            // matched: Chromium does not surface that name through UI
+            // Automation, so the DOM branch found no root and dropped the
+            // window's elements entirely.
             let dom_root = if use_dom && win.is_browser() {
-                elements.iter().position(|el| {
-                    el.automation_id == "RootWebArea"
-                        || (win.class_name == "MozillaWindowClass"
-                            && el.control_type == uia::DOCUMENT_CONTROL_TYPE)
-                })
+                elements
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, el)| el.control_type == uia::DOCUMENT_CONTROL_TYPE)
+                    // Chromium exposes a legacy accessibility bridge — a
+                    // `Chrome_WidgetWin_1` pane holding an empty Document that
+                    // reports full-window bounds. Electron shells surface that
+                    // bridge alongside the real page, and taking the first
+                    // Document found the empty one, whose bounds then filtered
+                    // every actual element away. Choose the Document that
+                    // actually contains elements.
+                    .max_by_key(|(index, el)| {
+                        elements
+                            .iter()
+                            .skip(*index)
+                            .filter(|child| inside_rect(child, &el.rect))
+                            .count()
+                    })
+                    .map(|(index, _)| index)
             } else {
                 None
             };
+            // A Document that contributes nothing must not blank the window:
+            // fall back to the plain element set rather than reporting an
+            // empty tree.
+            let dom_root = dom_root.filter(|index| {
+                let bounds = elements[*index].rect;
+                elements
+                    .iter()
+                    .skip(*index)
+                    .any(|el| inside_rect(el, &bounds) && !el.is_offscreen)
+            });
             let dom_bounds = dom_root.map(|index| elements[index].rect);
             if dom_root.is_some()
                 && dom_bounds.as_ref().is_some_and(|bounds| {
@@ -825,7 +948,8 @@ pub(crate) fn capture(params: &SnapshotParams) -> Result<SnapshotResult, String>
                     element_index,
                     window_element_base,
                 )
-                .and_then(|node| clip_node_to_rect(node, selected_rect.as_ref())) else {
+                .and_then(|node| clip_node_to_rect(node, selected_rect.as_ref()))
+                .and_then(|node| clip_node_to_rect(node, owner_bounds.as_ref())) else {
                     continue;
                 };
                 let is_interactive_type = uia::INTERACTIVE_CONTROL_TYPES.contains(&el.control_type);
@@ -887,6 +1011,16 @@ pub(crate) fn capture(params: &SnapshotParams) -> Result<SnapshotResult, String>
                     }
                 }
             }
+
+            dedupe_stacked_nodes(&mut local_interactive);
+            local_informative.retain(|node| !node.name.trim().is_empty());
+            dedupe_stacked_nodes(&mut local_informative);
+            // Scrollable regions nest the same way interactive controls do —
+            // Chromium stacks a legacy-bridge pane and its document at one
+            // point — and an unnamed scroll region gives the model nothing to
+            // aim at that its parent does not already offer.
+            local_scrollable.retain(|node| !node.name.trim().is_empty());
+            dedupe_stacked_nodes(&mut local_scrollable);
 
             if !local_interactive.is_empty()
                 || !local_scrollable.is_empty()
@@ -1135,6 +1269,121 @@ mod tests {
         }
     }
 
+    fn named_node(name: &str, control_type: &str, center: (i32, i32)) -> state::ElementNode {
+        state::ElementNode {
+            element_id: 0,
+            parent_id: None,
+            owner_handle: 0,
+            runtime_id: Vec::new(),
+            automation_id: String::new(),
+            supported_actions: Vec::new(),
+            name: name.to_string(),
+            control_type: control_type.to_string(),
+            center,
+            bounding_box: (center.0, center.1, center.0 + 1, center.1 + 1),
+            has_focus: false,
+        }
+    }
+
+    #[test]
+    fn a_control_wrapped_in_a_same_named_container_is_listed_once() {
+        // Measured on a real page: the list item and the link inside it carry
+        // the same name four pixels apart, and both passed the interactive
+        // filter.
+        let mut nodes = vec![
+            named_node("Code", "listitem", (127, 152)),
+            named_node("Code", "hyperlink", (127, 148)),
+            named_node("Issues", "listitem", (210, 152)),
+            named_node("Issues", "hyperlink", (210, 148)),
+        ];
+        dedupe_stacked_nodes(&mut nodes);
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].control_type, "listitem");
+        assert_eq!(nodes[1].name, "Issues");
+    }
+
+    #[test]
+    fn the_same_name_far_away_is_a_different_control() {
+        // "Code" also appears as a button elsewhere on the page; distance is
+        // what separates a repeated label from a stacked duplicate.
+        let mut nodes = vec![
+            named_node("Code", "listitem", (127, 152)),
+            named_node("Code", "button", (1230, 398)),
+        ];
+        dedupe_stacked_nodes(&mut nodes);
+        assert_eq!(nodes.len(), 2);
+    }
+
+    #[test]
+    fn unnamed_nodes_are_never_merged_together() {
+        let mut nodes = vec![
+            named_node("", "group", (100, 100)),
+            named_node("", "group", (101, 101)),
+        ];
+        dedupe_stacked_nodes(&mut nodes);
+        assert_eq!(nodes.len(), 2, "empty names carry no identity to match on");
+    }
+
+    #[test]
+    fn a_prefix_of_a_long_title_selects_that_window() {
+        // Real case: a 30-character verbatim prefix of a 64-character browser
+        // title scored ~47 under whole-string matching and was reported as
+        // "Window not found" even though the window was open.
+        let windows = vec![
+            snapshot_window(1, "ntaksh42/Windows-Operation-Cli および他 6 ページ - 個人 - Microsoft Edge"),
+            snapshot_window(2, "Microsoft PC Manager"),
+        ];
+        let options = ScanOptions::resolve(
+            None,
+            Some("ntaksh42/Windows-Operation-Cli".to_string()),
+            None,
+        )
+        .unwrap();
+        let selected = select_scan_targets(&options, None, &windows).unwrap();
+        assert_eq!(selected.first().map(|w| w.handle), Some(1));
+    }
+
+    #[test]
+    fn equal_partial_matches_prefer_the_title_the_query_covers_most() {
+        // Both titles contain the query, so both score 100 on partial match.
+        // The shorter title is the better answer, not an ambiguity error.
+        let windows = vec![
+            snapshot_window(1, "Inbox - Gmail - Mozilla Firefox - Personal - Work Profile"),
+            snapshot_window(2, "Gmail"),
+        ];
+        let options =
+            ScanOptions::resolve(None, Some("Gmail".to_string()), None).unwrap();
+        let selected = select_scan_targets(&options, None, &windows).unwrap();
+        assert_eq!(selected.first().map(|w| w.handle), Some(2));
+    }
+
+    #[test]
+    fn a_title_that_is_only_a_fragment_of_the_query_does_not_win() {
+        // Partial matching slides the shorter string across the longer one, so
+        // an unguarded partial score rates "Claude" a perfect match for the
+        // query "Claude Settings" and the shorter title would take it.
+        let windows = vec![
+            snapshot_window(1, "Claude"),
+            snapshot_window(2, "Claude Settings"),
+        ];
+        let options =
+            ScanOptions::resolve(None, Some("Claude Settings".to_string()), None).unwrap();
+        let selected = select_scan_targets(&options, None, &windows).unwrap();
+        assert_eq!(selected.first().map(|w| w.handle), Some(2));
+    }
+
+    #[test]
+    fn identical_titles_are_still_reported_as_ambiguous() {
+        let windows = vec![
+            snapshot_window(1, "Settings"),
+            snapshot_window(2, "Settings"),
+        ];
+        let options =
+            ScanOptions::resolve(None, Some("Settings".to_string()), None).unwrap();
+        let error = select_scan_targets(&options, None, &windows).unwrap_err();
+        assert!(error.contains("ambiguous"), "{error}");
+    }
+
     #[test]
     fn scan_options_default_to_foreground_and_two_seconds() {
         let options = ScanOptions::resolve(None, None, None).unwrap();
@@ -1298,6 +1547,58 @@ mod tests {
                 state::element_id(7, 1)
             )
         );
+    }
+
+    fn raw_element(rect: (i32, i32, i32, i32), clickable: Option<(i32, i32)>) -> uia::RawElement {
+        uia::RawElement {
+            parent_index: None,
+            runtime_id: Vec::new(),
+            supported_actions: Vec::new(),
+            control_type: 0,
+            name: "n".to_string(),
+            automation_id: String::new(),
+            rect: windows::Win32::Foundation::RECT {
+                left: rect.0,
+                top: rect.1,
+                right: rect.2,
+                bottom: rect.3,
+            },
+            is_enabled: true,
+            is_offscreen: false,
+            has_keyboard_focus: false,
+            is_modal: false,
+            is_scrollable: false,
+            vertical_scroll_percent: 0.0,
+            clickable_point: clickable,
+        }
+    }
+
+    #[test]
+    fn clickable_point_is_preferred_over_the_geometric_center() {
+        let bounds = (0, 0, 100, 40);
+        // No provider point: the geometric center stands.
+        assert_eq!(
+            element_center(&raw_element(bounds, None), bounds),
+            (50, 20)
+        );
+        // A provider point inside the element wins — this is the case where
+        // the center lands on a child or on padding.
+        assert_eq!(
+            element_center(&raw_element(bounds, Some((12, 30))), bounds),
+            (12, 30)
+        );
+    }
+
+    #[test]
+    fn an_out_of_bounds_clickable_point_falls_back_to_the_center() {
+        let bounds = (0, 0, 100, 40);
+        for stale in [(200, 20), (-5, 20), (50, 400)] {
+            assert_eq!(
+                element_center(&raw_element(bounds, Some(stale)), bounds),
+                (50, 20),
+                "stale point {stale:?} must not be trusted"
+            );
+        }
     }
 
     #[test]

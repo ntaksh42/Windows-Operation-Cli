@@ -17,7 +17,33 @@ fn validate_label_point(node: state::ElementNode) -> Result<(i32, i32), String> 
     if !point_inside_rect(x, y, (owner_x, owner_y, owner_width, owner_height)) {
         return Err("Label owner window moved. Please call Snapshot again.".to_string());
     }
+    if window::is_point_occluded(x, y, node.owner_handle) {
+        return Err(format!(
+            "Element \"{}\" is covered by another window at ({x},{y}). Bring its window to the front (App switch) or call Snapshot again.",
+            node.name
+        ));
+    }
     Ok((x, y))
+}
+
+/// Resolves one `label` value to its Snapshot node.
+///
+/// Snapshot prints `[id=<element_id>]`, where `element_id` packs the capture
+/// generation into the high 32 bits (`state::element_id`). Generations start
+/// at 1, so every printed id is >= 2^32 while a positional label is bounded
+/// by the element count — the two spaces cannot overlap. Accept both: an id
+/// resolves through the generation-checked path (so one from a superseded
+/// Snapshot is reported as stale instead of silently indexing to an
+/// unrelated element), a smaller value stays a positional label.
+fn resolve_label_value(label: i64) -> Result<state::ElementNode, String> {
+    if label < 0 {
+        return Err(format!("Label {label} out of range"));
+    }
+    let label = label as u64;
+    if label >= (1u64 << 32) {
+        return state::resolve_element(label);
+    }
+    state::resolve_label_node(label as usize)
 }
 
 /// Resolves a UI element `label` to coordinates, rejecting negative labels
@@ -25,25 +51,14 @@ fn validate_label_point(node: state::ElementNode) -> Result<(i32, i32), String> 
 /// Python's list-negative-indexing; a label is never meant to be negative,
 /// so this reports it as out of range instead).
 pub fn resolve_label_checked(label: i64) -> Result<(i32, i32), String> {
-    if label < 0 {
-        return Err(format!("Label {label} out of range"));
-    }
-    validate_label_point(state::resolve_label_node(label as usize)?)
+    validate_label_point(resolve_label_value(label)?)
 }
 
 /// Resolves multiple labels to coordinates in bulk.
 pub fn resolve_labels_checked(labels: &[i64]) -> Result<Vec<(i32, i32)>, String> {
-    let mut usize_labels = Vec::with_capacity(labels.len());
-    for &label in labels {
-        if label < 0 {
-            return Err(format!("Label {label} out of range"));
-        }
-        usize_labels.push(label as usize);
-    }
-    usize_labels
-        .into_iter()
-        .map(state::resolve_label_node)
-        .map(|node| node.and_then(validate_label_point))
+    labels
+        .iter()
+        .map(|&label| resolve_label_value(label).and_then(validate_label_point))
         .collect()
 }
 

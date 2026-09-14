@@ -122,6 +122,13 @@ pub fn resolve_label(label: usize) -> Result<(i32, i32), String> {
 /// Resolves a single UI element label to its complete Snapshot identity.
 /// Callers that inject input use this to reject a label whose owner window
 /// has moved or closed since the Snapshot was taken.
+///
+/// A bare label carries no generation, so a label from a superseded Snapshot
+/// indexes into the current state and resolves to whatever now sits at that
+/// position. Input tools therefore reach this through
+/// `tools::support::resolve_label_value`, which sends a generation-scoped
+/// `element_id` (what Snapshot prints) to [`resolve_element`] instead, and
+/// keeps this positional path only for a bare index.
 pub fn resolve_label_node(label: usize) -> Result<ElementNode, String> {
     let guard = state_lock().lock().unwrap();
     let state = guard
