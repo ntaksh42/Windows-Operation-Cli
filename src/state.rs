@@ -122,6 +122,11 @@ pub fn resolve_label(label: usize) -> Result<(i32, i32), String> {
 /// Resolves a single UI element label to its complete Snapshot identity.
 /// Callers that inject input use this to reject a label whose owner window
 /// has moved or closed since the Snapshot was taken.
+///
+/// A bare label carries no generation, so a label from a superseded Snapshot
+/// would otherwise index silently into the current state and resolve to an
+/// unrelated element. [`resolve_label_node_checked`] is the guarded entry
+/// point; callers pass the generation the label was read from.
 pub fn resolve_label_node(label: usize) -> Result<ElementNode, String> {
     let guard = state_lock().lock().unwrap();
     let state = guard
@@ -137,6 +142,34 @@ pub fn resolve_label_node(label: usize) -> Result<ElementNode, String> {
             .cloned()
             .ok_or_else(|| format!("Label {label} out of range"))
     }
+}
+
+/// The generation of the most recent Snapshot, or `None` when no Snapshot has
+/// been taken yet.
+pub fn current_generation() -> Option<u32> {
+    state_lock()
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|state| state.generation)
+}
+
+/// Resolves a label, rejecting it when `generation` does not match the state
+/// the label was produced from. Passing `None` accepts the current state (a
+/// caller that did not carry a generation through).
+pub fn resolve_label_node_checked(
+    label: usize,
+    generation: Option<u32>,
+) -> Result<ElementNode, String> {
+    if let Some(generation) = generation {
+        let current = current_generation().ok_or_else(|| EMPTY_STATE_ERROR.to_string())?;
+        if generation != current {
+            return Err(format!(
+                "Label {label} is stale: it came from Snapshot generation {generation}, but the current generation is {current}. Please call Snapshot again."
+            ));
+        }
+    }
+    resolve_label_node(label)
 }
 
 /// Resolves multiple UI element labels to screen coordinates in bulk.
@@ -235,6 +268,48 @@ mod tests {
             ]),
             Some(SupportedAction::Invoke)
         );
+    }
+
+    #[test]
+    fn a_stale_generation_is_rejected_before_resolving_a_label() {
+        let _g = TEST_GUARD.lock().unwrap();
+        clear_state();
+        let first_generation = next_generation();
+        set_state(DesktopState {
+            generation: first_generation,
+            interactive_nodes: vec![node(10, 20)],
+            scrollable_nodes: vec![],
+        });
+        // Same generation still resolves.
+        assert_eq!(
+            resolve_label_node_checked(0, Some(first_generation))
+                .unwrap()
+                .center,
+            (10, 20)
+        );
+
+        // A later Snapshot shifts what label 0 means; the old generation must
+        // not silently resolve to the new element.
+        let second_generation = next_generation();
+        set_state(DesktopState {
+            generation: second_generation,
+            interactive_nodes: vec![node(99, 99)],
+            scrollable_nodes: vec![],
+        });
+        let error = resolve_label_node_checked(0, Some(first_generation)).unwrap_err();
+        assert!(error.contains("stale"), "{error}");
+        assert_eq!(
+            resolve_label_node_checked(0, Some(second_generation))
+                .unwrap()
+                .center,
+            (99, 99)
+        );
+        // No generation supplied keeps the previous permissive behavior.
+        assert_eq!(
+            resolve_label_node_checked(0, None).unwrap().center,
+            (99, 99)
+        );
+        clear_state();
     }
 
     #[test]
