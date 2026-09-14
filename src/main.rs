@@ -22,7 +22,7 @@ mod vdm;
 mod win;
 mod window;
 
-use server::WindowsComputerUseServer;
+use server::WindowsOperationCliServer;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -30,7 +30,7 @@ async fn main() -> Result<()> {
     // before any HWND-dependent API so cursor, monitor, and input coordinates
     // remain in that same coordinate space on mixed-DPI desktops.
     let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
-    let service = WindowsComputerUseServer.serve(stdio()).await?;
+    let service = WindowsOperationCliServer.serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
 }

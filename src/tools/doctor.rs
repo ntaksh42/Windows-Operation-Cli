@@ -71,7 +71,7 @@ mod tests {
     #[test]
     fn command_detection_rejects_missing_program() {
         assert!(!command_exists(
-            "windows-computeruse-definitely-missing.exe"
+            "windows-operation-cli-definitely-missing.exe"
         ));
     }
 }

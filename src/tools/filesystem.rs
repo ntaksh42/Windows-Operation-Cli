@@ -1096,7 +1096,7 @@ mod tests {
     #[test]
     fn reads_and_writes_requested_text_encoding() {
         let path = std::env::temp_dir().join(format!(
-            "windows-computeruse-encoding-test-{}.txt",
+            "windows-operation-cli-encoding-test-{}.txt",
             std::process::id()
         ));
         let encoding = encoding_rs::UTF_16LE;
@@ -1110,7 +1110,7 @@ mod tests {
     #[test]
     fn negative_offset_reads_from_end() {
         let path = std::env::temp_dir().join(format!(
-            "windows-computeruse-tail-test-{}.txt",
+            "windows-operation-cli-tail-test-{}.txt",
             std::process::id()
         ));
         fs::write(&path, "one\ntwo\nthree\n").unwrap();
@@ -1122,7 +1122,7 @@ mod tests {
     #[test]
     fn edit_requires_exactly_one_match() {
         let path = std::env::temp_dir().join(format!(
-            "windows-computeruse-edit-test-{}.txt",
+            "windows-operation-cli-edit-test-{}.txt",
             std::process::id()
         ));
         fs::write(&path, "alpha\nbeta\n").unwrap();
@@ -1138,7 +1138,7 @@ mod tests {
     #[test]
     fn delete_dry_run_preserves_targets() {
         let dir = std::env::temp_dir().join(format!(
-            "windows-computeruse-delete-test-{}",
+            "windows-operation-cli-delete-test-{}",
             std::process::id()
         ));
         fs::create_dir_all(&dir).unwrap();
@@ -1152,7 +1152,7 @@ mod tests {
     #[test]
     fn content_search_reports_path_and_line() {
         let dir = std::env::temp_dir().join(format!(
-            "windows-computeruse-search-test-{}",
+            "windows-operation-cli-search-test-{}",
             std::process::id()
         ));
         fs::create_dir_all(&dir).unwrap();

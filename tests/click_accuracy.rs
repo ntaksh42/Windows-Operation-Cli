@@ -56,7 +56,7 @@ fn click_lands_within_two_pixels() {
     let thread = std::thread::spawn(move || unsafe {
         let module = GetModuleHandleW(None).unwrap();
         let instance = HINSTANCE(module.0);
-        let class_name = w!("WindowsComputerUseClickAccuracyTest");
+        let class_name = w!("WindowsOperationCliClickAccuracyTest");
         let class = WNDCLASSW {
             lpfnWndProc: Some(window_proc),
             hInstance: instance,

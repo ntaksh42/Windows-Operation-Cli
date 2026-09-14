@@ -82,7 +82,7 @@ mod tests {
     #[test]
     fn audit_log_contains_only_required_fields() {
         let path = std::env::temp_dir().join(format!(
-            "windows-computeruse-audit-test-{}.jsonl",
+            "windows-operation-cli-audit-test-{}.jsonl",
             std::process::id()
         ));
         let _ = std::fs::remove_file(&path);

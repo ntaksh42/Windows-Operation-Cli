@@ -288,8 +288,8 @@ mod tests {
 
     #[test]
     fn parses_hkcu_path() {
-        let (_, subpath) = parse_registry_path(r"HKCU:\Software\WindowsComputerUseTest").unwrap();
-        assert_eq!(subpath, r"Software\WindowsComputerUseTest");
+        let (_, subpath) = parse_registry_path(r"HKCU:\Software\WindowsOperationCliTest").unwrap();
+        assert_eq!(subpath, r"Software\WindowsOperationCliTest");
     }
 
     #[test]

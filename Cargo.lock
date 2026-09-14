@@ -2480,33 +2480,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "windows-computeruse"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arboard",
- "base64",
- "chrono",
- "csv",
- "dirs",
- "encoding_rs",
- "filetime",
- "htmd",
- "image",
- "regex",
- "reqwest",
- "rmcp",
- "schemars",
- "serde",
- "serde_json",
- "strsim",
- "sysinfo",
- "tokio",
- "windows",
- "windows-registry",
-]
-
-[[package]]
 name = "windows-core"
 version = "0.62.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2566,6 +2539,33 @@ checksum = "6e2e40844ac143cdb44aead537bbf727de9b044e107a0f1220392177d15b0f26"
 dependencies = [
  "windows-core",
  "windows-link",
+]
+
+[[package]]
+name = "windows-operation-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "base64",
+ "chrono",
+ "csv",
+ "dirs",
+ "encoding_rs",
+ "filetime",
+ "htmd",
+ "image",
+ "regex",
+ "reqwest",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "strsim",
+ "sysinfo",
+ "tokio",
+ "windows",
+ "windows-registry",
 ]
 
 [[package]]
