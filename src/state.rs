@@ -114,24 +114,33 @@ pub fn resolve_element(id: u64) -> Result<ElementNode, String> {
 ///
 /// Labels index `interactive_nodes` first; values beyond that range index
 /// into `scrollable_nodes` as an offset.
+#[cfg(test)]
 pub fn resolve_label(label: usize) -> Result<(i32, i32), String> {
+    Ok(resolve_label_node(label)?.center)
+}
+
+/// Resolves a single UI element label to its complete Snapshot identity.
+/// Callers that inject input use this to reject a label whose owner window
+/// has moved or closed since the Snapshot was taken.
+pub fn resolve_label_node(label: usize) -> Result<ElementNode, String> {
     let guard = state_lock().lock().unwrap();
     let state = guard
         .as_ref()
         .ok_or_else(|| EMPTY_STATE_ERROR.to_string())?;
     if label < state.interactive_nodes.len() {
-        Ok(state.interactive_nodes[label].center)
+        Ok(state.interactive_nodes[label].clone())
     } else {
         let idx = label - state.interactive_nodes.len();
         state
             .scrollable_nodes
             .get(idx)
-            .map(|n| n.center)
+            .cloned()
             .ok_or_else(|| format!("Label {label} out of range"))
     }
 }
 
 /// Resolves multiple UI element labels to screen coordinates in bulk.
+#[cfg(test)]
 pub fn resolve_labels(labels: &[usize]) -> Result<Vec<(i32, i32)>, String> {
     let guard = state_lock().lock().unwrap();
     let state = guard

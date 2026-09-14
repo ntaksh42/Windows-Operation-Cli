@@ -110,6 +110,15 @@ pub fn coordinate_scale_text(coord_scale: f64) -> String {
     )
 }
 
+/// Explains how to convert a returned image coordinate into virtual desktop
+/// screen coordinates when the capture begins at a non-zero desktop origin.
+pub fn coordinate_transform_text(coord_scale: f64, origin_x: i32, origin_y: i32) -> String {
+    format!(
+        "Screenshot Coordinate Transform: screen = ({origin_x} + image_x × {coord_scale}, \\
+         {origin_y} + image_y × {coord_scale})"
+    )
+}
+
 /// Overlays a light grid (`w_count` vertical, `h_count` horizontal
 /// divisions) onto `image` for spatial reference.
 pub(crate) fn draw_grid_lines(image: &mut image::RgbaImage, w_count: i64, h_count: i64) {
@@ -251,5 +260,12 @@ mod tests {
         let text = coordinate_scale_text(2.0);
         assert!(text.contains("Screenshot Coordinate Scale: 2"));
         assert!(text.contains("(400, 300)"));
+    }
+
+    #[test]
+    fn coordinate_transform_includes_capture_origin() {
+        let text = coordinate_transform_text(2.0, -1920, 100);
+        assert!(text.contains("-1920 + image_x × 2"));
+        assert!(text.contains("100 + image_y × 2"));
     }
 }

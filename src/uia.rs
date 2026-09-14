@@ -23,7 +23,7 @@ use windows::Win32::System::Ole::{
 };
 use windows::Win32::System::Variant::{VARIANT, VARIANT_0_0, VARIANT_0_0_0, VT_BOOL, VT_I4};
 use windows::Win32::UI::Accessibility::*;
-use windows::core::Result as WinResult;
+use windows::core::{Interface, Result as WinResult};
 
 /// A UI element read from the UIA cache after a `FindAllBuildCache` call.
 /// Every field here is a `Cached*` read — no COM round trip per field.
@@ -72,6 +72,18 @@ pub fn ensure_com_initialized() -> Result<(), String> {
 /// Creates the `IUIAutomation` root object (`CUIAutomation`).
 pub fn create_automation() -> WinResult<IUIAutomation> {
     unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }
+}
+
+/// Bounds the next UIA provider transaction. `IUIAutomation2` is available on
+/// supported Windows versions; callers keep using the base interface for the
+/// rest of the API surface.
+pub fn set_transaction_timeout(automation: &IUIAutomation, timeout_ms: u32) -> Result<(), String> {
+    let automation: IUIAutomation2 = automation.cast().map_err(|error| error.to_string())?;
+    unsafe {
+        automation
+            .SetTransactionTimeout(timeout_ms)
+            .map_err(|error| error.to_string())
+    }
 }
 
 /// Control-type ids considered "interactive" (docs/SPEC.md §6 item 4):
@@ -409,10 +421,43 @@ fn find_matching_element(
     identity: &crate::state::ElementNode,
 ) -> Result<IUIAutomationElement, String> {
     let hwnd = HWND(identity.owner_handle as *mut _);
-    let matches = unsafe {
+    unsafe {
         let root = automation
             .ElementFromHandle(hwnd)
             .map_err(|_| "Element owner window is closed".to_string())?;
+        // AutomationId is stable for the common case. Probe that small subset
+        // first; retain the full RuntimeId search below when it cannot prove a
+        // unique match, preserving the stricter identity contract.
+        if !identity.automation_id.is_empty() {
+            let automation_id = VARIANT::from(identity.automation_id.as_str());
+            if let Ok(condition) =
+                automation.CreatePropertyCondition(UIA_AutomationIdPropertyId, &automation_id)
+                && let Ok(candidates) = root.FindAll(TreeScope_Subtree, &condition)
+            {
+                let mut exact_matches = Vec::new();
+                for index in 0..candidates.Length().map_err(|error| error.to_string())? {
+                    let element = candidates
+                        .GetElement(index)
+                        .map_err(|error| error.to_string())?;
+                    let runtime_id = element.GetRuntimeId().map_err(|error| error.to_string())?;
+                    let current = runtime_id_from_safe_array(runtime_id)
+                        .map_err(|error| error.to_string())?;
+                    if current == identity.runtime_id {
+                        exact_matches.push(element);
+                    }
+                }
+                match exact_matches.len() {
+                    1 => return Ok(exact_matches.remove(0)),
+                    count if count > 1 => {
+                        return Err(format!(
+                            "Element {} runtime identity matched {count} elements",
+                            identity.element_id
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        }
         let condition = automation
             .CreateTrueCondition()
             .map_err(|error| error.to_string())?;
@@ -444,20 +489,20 @@ fn find_matching_element(
                 guarded_fallbacks.push(element);
             }
         }
-        if matches.is_empty() {
+        let matches = if matches.is_empty() {
             guarded_fallbacks
         } else {
             matches
+        };
+        if matches.len() != 1 {
+            return Err(format!(
+                "Element {} runtime identity matched {} elements",
+                identity.element_id,
+                matches.len()
+            ));
         }
-    };
-    if matches.len() != 1 {
-        return Err(format!(
-            "Element {} runtime identity matched {} elements",
-            identity.element_id,
-            matches.len()
-        ));
+        Ok(matches[0].clone())
     }
-    Ok(matches[0].clone())
 }
 
 pub fn invoke_matching_element(

@@ -3,6 +3,22 @@
 
 use crate::params::ListOrString;
 use crate::state;
+use crate::window;
+
+fn point_inside_rect(x: i32, y: i32, bounds: (i32, i32, i32, i32)) -> bool {
+    let (left, top, width, height) = bounds;
+    x >= left && x < left + width && y >= top && y < top + height
+}
+
+fn validate_label_point(node: state::ElementNode) -> Result<(i32, i32), String> {
+    let (owner_x, owner_y, owner_width, owner_height) = window::get_window_rect(node.owner_handle)
+        .ok_or_else(|| "Label owner window is closed. Please call Snapshot again.".to_string())?;
+    let (x, y) = node.center;
+    if !point_inside_rect(x, y, (owner_x, owner_y, owner_width, owner_height)) {
+        return Err("Label owner window moved. Please call Snapshot again.".to_string());
+    }
+    Ok((x, y))
+}
 
 /// Resolves a UI element `label` to coordinates, rejecting negative labels
 /// up front (the Python reference silently wraps negative labels via
@@ -12,7 +28,7 @@ pub fn resolve_label_checked(label: i64) -> Result<(i32, i32), String> {
     if label < 0 {
         return Err(format!("Label {label} out of range"));
     }
-    state::resolve_label(label as usize)
+    validate_label_point(state::resolve_label_node(label as usize)?)
 }
 
 /// Resolves multiple labels to coordinates in bulk.
@@ -24,7 +40,11 @@ pub fn resolve_labels_checked(labels: &[i64]) -> Result<Vec<(i32, i32)>, String>
         }
         usize_labels.push(label as usize);
     }
-    state::resolve_labels(&usize_labels)
+    usize_labels
+        .into_iter()
+        .map(state::resolve_label_node)
+        .map(|node| node.and_then(validate_label_point))
+        .collect()
 }
 
 /// Converts an optional `loc` param into `Option<Vec<i32>>`, resolving the
@@ -71,5 +91,16 @@ pub fn resolve_point_optional(
         None => Ok(None),
         Some(v) if v.len() == 2 => Ok(Some((v[0], v[1]))),
         Some(_) => Err("Location must be a list of exactly 2 integers [x, y]".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn owner_bounds_detect_a_moved_label() {
+        assert!(point_inside_rect(20, 20, (10, 10, 20, 20)));
+        assert!(!point_inside_rect(20, 20, (21, 21, 20, 20)));
     }
 }

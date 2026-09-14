@@ -1,5 +1,6 @@
 //! Screen capture backends.
 //!
+use std::cell::RefCell;
 use std::env;
 use std::ffi::c_void;
 
@@ -24,6 +25,19 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
 };
 use windows::core::Interface;
+
+const DXGI_ACQUIRE_TIMEOUT_MS: u32 = 100;
+
+type AdapterKey = (u32, i32);
+
+thread_local! {
+    // Screenshot requests run on Tokio's blocking threads. Reusing the D3D
+    // device per such thread avoids recreating an expensive device for every
+    // output on every request, while keeping COM objects thread-affine.
+    static DXGI_DEVICES: RefCell<Vec<(AdapterKey, ID3D11Device, ID3D11DeviceContext)>> = const {
+        RefCell::new(Vec::new())
+    };
+}
 
 /// Screen capture backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,6 +142,24 @@ unsafe fn create_device(
     }
 }
 
+fn device_for_adapter(
+    adapter: &IDXGIAdapter1,
+) -> Result<(ID3D11Device, ID3D11DeviceContext), String> {
+    let desc = unsafe { adapter.GetDesc1() }.map_err(|error| error.to_string())?;
+    let key = (desc.AdapterLuid.LowPart, desc.AdapterLuid.HighPart);
+    DXGI_DEVICES.with(|devices| {
+        let mut devices = devices.borrow_mut();
+        if let Some((_, device, context)) =
+            devices.iter().find(|(stored_key, _, _)| *stored_key == key)
+        {
+            return Ok((device.clone(), context.clone()));
+        }
+        let (device, context) = unsafe { create_device(adapter) }?;
+        devices.push((key, device.clone(), context.clone()));
+        Ok((device, context))
+    })
+}
+
 unsafe fn capture_output(
     adapter: &IDXGIAdapter1,
     output: &IDXGIOutput1,
@@ -136,14 +168,14 @@ unsafe fn capture_output(
         let output_desc = output
             .GetDesc()
             .map_err(|e| format!("GetDesc failed: {e}"))?;
-        let (device, context) = create_device(adapter)?;
+        let (device, context) = device_for_adapter(adapter)?;
         let duplication = output
             .DuplicateOutput(&device)
             .map_err(|e| format!("DuplicateOutput failed: {e}"))?;
         let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut resource = None;
         duplication
-            .AcquireNextFrame(500, &mut frame_info, &mut resource)
+            .AcquireNextFrame(DXGI_ACQUIRE_TIMEOUT_MS, &mut frame_info, &mut resource)
             .map_err(|e| format!("AcquireNextFrame failed: {e}"))?;
 
         let result = (|| {
@@ -245,21 +277,16 @@ unsafe fn capture_rect_dxgi(rect: RECT) -> Result<image::RgbaImage, String> {
                         continue;
                     }
                 };
-                let source_x = (left - output_bounds.left) as u32;
-                let source_y = (top - output_bounds.top) as u32;
-                for y in 0..(bottom - top) as u32 {
-                    for x in 0..(right - left) as u32 {
-                        if let Some(pixel) =
-                            output_image.get_pixel_checked(source_x + x, source_y + y)
-                        {
-                            result.put_pixel(
-                                (left - rect.left) as u32 + x,
-                                (top - rect.top) as u32 + y,
-                                *pixel,
-                            );
-                        }
-                    }
-                }
+                copy_rgba_region(
+                    &output_image,
+                    &mut result,
+                    (
+                        (left - output_bounds.left) as u32,
+                        (top - output_bounds.top) as u32,
+                    ),
+                    ((left - rect.left) as u32, (top - rect.top) as u32),
+                    ((right - left) as u32, (bottom - top) as u32),
+                );
                 captured_any = true;
             }
         }
@@ -268,6 +295,33 @@ unsafe fn capture_rect_dxgi(rect: RECT) -> Result<image::RgbaImage, String> {
                 "DXGI found no attached display intersecting the capture region".to_string()
             })
         })
+    }
+}
+
+/// Copies an RGBA sub-rectangle row-by-row. This avoids a bounds check and a
+/// method call for every pixel while composing multi-monitor screenshots.
+fn copy_rgba_region(
+    source: &image::RgbaImage,
+    destination: &mut image::RgbaImage,
+    (source_x, source_y): (u32, u32),
+    (destination_x, destination_y): (u32, u32),
+    (width, height): (u32, u32),
+) {
+    let copy_width = width
+        .min(source.width().saturating_sub(source_x))
+        .min(destination.width().saturating_sub(destination_x));
+    let copy_height = height
+        .min(source.height().saturating_sub(source_y))
+        .min(destination.height().saturating_sub(destination_y));
+    let source_stride = source.width() as usize * 4;
+    let destination_stride = destination.width() as usize * 4;
+    let row_bytes = copy_width as usize * 4;
+    for row in 0..copy_height as usize {
+        let source_start = (source_y as usize + row) * source_stride + source_x as usize * 4;
+        let destination_start =
+            (destination_y as usize + row) * destination_stride + destination_x as usize * 4;
+        destination.as_mut()[destination_start..destination_start + row_bytes]
+            .copy_from_slice(&source.as_raw()[source_start..source_start + row_bytes]);
     }
 }
 
@@ -412,6 +466,15 @@ mod tests {
         };
         let err = capture_rect_with_backend(rect, Backend::Gdi).unwrap_err();
         assert!(err.contains("Invalid capture region"));
+    }
+
+    #[test]
+    fn rgba_region_copy_clips_to_both_images() {
+        let source = image::RgbaImage::from_pixel(2, 2, image::Rgba([1, 2, 3, 4]));
+        let mut destination = image::RgbaImage::new(2, 2);
+        copy_rgba_region(&source, &mut destination, (0, 0), (1, 1), (2, 2));
+        assert_eq!(destination.get_pixel(1, 1), &image::Rgba([1, 2, 3, 4]));
+        assert_eq!(destination.get_pixel(0, 1), &image::Rgba([0, 0, 0, 0]));
     }
 
     #[test]

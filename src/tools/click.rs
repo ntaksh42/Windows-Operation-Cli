@@ -61,7 +61,7 @@ pub fn click(params: ClickParams) -> Result<String, String> {
     let _modifier = input_sim::ModifierGuard::press(params.modifier.as_deref())?;
 
     if clicks == 0 {
-        input_sim::set_cursor_pos(x, y);
+        input_sim::set_cursor_pos(x, y)?;
     } else if button == ClickButton::Left && clicks >= 2 {
         let dbl_wait =
             std::time::Duration::from_millis((input_sim::get_double_click_time_ms() / 2) as u64);
@@ -71,7 +71,7 @@ pub fn click(params: ClickParams) -> Result<String, String> {
             } else {
                 input_sim::input_settle_delay()
             };
-            input_sim::click_once(x, y, button.as_mouse_button(), wait_after);
+            input_sim::click_once(x, y, button.as_mouse_button(), wait_after)?;
         }
     } else {
         for _ in 0..clicks {
@@ -80,7 +80,7 @@ pub fn click(params: ClickParams) -> Result<String, String> {
                 y,
                 button.as_mouse_button(),
                 input_sim::input_settle_delay(),
-            );
+            )?;
         }
     }
 

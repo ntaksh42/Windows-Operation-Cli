@@ -129,7 +129,10 @@ impl WindowsComputerUseServer {
         Parameters(params): Parameters<ClickParams>,
     ) -> Result<CallToolResult, McpError> {
         let audit = begin_tool!("Click");
-        as_call_result(click::click(params), audit)
+        let result = tokio::task::spawn_blocking(move || click::click(params))
+            .await
+            .unwrap_or_else(|error| Err(format!("Click tool panicked: {error}")));
+        as_call_result(result, audit)
     }
 
     #[tool(
@@ -173,7 +176,10 @@ impl WindowsComputerUseServer {
         Parameters(params): Parameters<TypeParams>,
     ) -> Result<CallToolResult, McpError> {
         let audit = begin_tool!("Type");
-        as_call_result(typing::type_text(params), audit)
+        let result = tokio::task::spawn_blocking(move || typing::type_text(params))
+            .await
+            .unwrap_or_else(|error| Err(format!("Type tool panicked: {error}")));
+        as_call_result(result, audit)
     }
 
     #[tool(
@@ -185,7 +191,10 @@ impl WindowsComputerUseServer {
         Parameters(params): Parameters<ScrollParams>,
     ) -> Result<CallToolResult, McpError> {
         let audit = begin_tool!("Scroll");
-        as_call_result(scroll::scroll(params), audit)
+        let result = tokio::task::spawn_blocking(move || scroll::scroll(params))
+            .await
+            .unwrap_or_else(|error| Err(format!("Scroll tool panicked: {error}")));
+        as_call_result(result, audit)
     }
 
     #[tool(
@@ -197,7 +206,10 @@ impl WindowsComputerUseServer {
         Parameters(params): Parameters<MoveParams>,
     ) -> Result<CallToolResult, McpError> {
         let audit = begin_tool!("Move");
-        as_call_result(move_mouse::move_mouse(params), audit)
+        let result = tokio::task::spawn_blocking(move || move_mouse::move_mouse(params))
+            .await
+            .unwrap_or_else(|error| Err(format!("Move tool panicked: {error}")));
+        as_call_result(result, audit)
     }
 
     #[tool(
@@ -209,7 +221,10 @@ impl WindowsComputerUseServer {
         Parameters(params): Parameters<ShortcutParams>,
     ) -> Result<CallToolResult, McpError> {
         let audit = begin_tool!("Shortcut");
-        as_call_result(shortcut::shortcut(params), audit)
+        let result = tokio::task::spawn_blocking(move || shortcut::shortcut(params))
+            .await
+            .unwrap_or_else(|error| Err(format!("Shortcut tool panicked: {error}")));
+        as_call_result(result, audit)
     }
 
     #[tool(
@@ -221,7 +236,10 @@ impl WindowsComputerUseServer {
         Parameters(params): Parameters<MultiSelectParams>,
     ) -> Result<CallToolResult, McpError> {
         let audit = begin_tool!("MultiSelect");
-        as_call_result(multi_select::multi_select(params), audit)
+        let result = tokio::task::spawn_blocking(move || multi_select::multi_select(params))
+            .await
+            .unwrap_or_else(|error| Err(format!("MultiSelect tool panicked: {error}")));
+        as_call_result(result, audit)
     }
 
     #[tool(
@@ -233,7 +251,10 @@ impl WindowsComputerUseServer {
         Parameters(params): Parameters<MultiEditParams>,
     ) -> Result<CallToolResult, McpError> {
         let audit = begin_tool!("MultiEdit");
-        as_call_result(multi_edit::multi_edit(params), audit)
+        let result = tokio::task::spawn_blocking(move || multi_edit::multi_edit(params))
+            .await
+            .unwrap_or_else(|error| Err(format!("MultiEdit tool panicked: {error}")));
+        as_call_result(result, audit)
     }
 
     #[tool(

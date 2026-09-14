@@ -59,7 +59,7 @@ pub fn type_text(params: TypeParams) -> Result<String, String> {
     let press_enter = opt_bool(&params.press_enter, false)?;
     let caret_position = params.caret_position.unwrap_or(CaretPosition::Idle);
 
-    type_at(x, y, &params.text, caret_position, clear, press_enter);
+    type_at(x, y, &params.text, caret_position, clear, press_enter)?;
     Ok(format!("Typed {} at ({x},{y}).", params.text))
 }
 
@@ -72,41 +72,43 @@ pub fn type_at(
     caret_position: CaretPosition,
     clear: bool,
     press_enter: bool,
-) {
-    input_sim::click_once(x, y, MouseButton::Left, input_sim::input_settle_delay());
+) -> Result<(), String> {
+    input_sim::click_once(x, y, MouseButton::Left, input_sim::input_settle_delay())?;
 
     match caret_position {
-        CaretPosition::Start => input_sim::key_tap(VK_HOME.0, KEY_WAIT),
-        CaretPosition::End => input_sim::key_tap(VK_END.0, KEY_WAIT),
+        CaretPosition::Start => input_sim::key_tap(VK_HOME.0, KEY_WAIT)?,
+        CaretPosition::End => input_sim::key_tap(VK_END.0, KEY_WAIT)?,
         CaretPosition::Idle => {}
     }
 
     if clear {
-        input_sim::chord(&[VK_CONTROL.0, b'A' as u16], KEY_WAIT);
-        input_sim::key_tap(VK_BACK.0, KEY_WAIT);
+        input_sim::chord(&[VK_CONTROL.0, b'A' as u16], KEY_WAIT)?;
+        input_sim::key_tap(VK_BACK.0, KEY_WAIT)?;
     }
 
     let has_control_chars = text.contains(['\n', '\t', '{', '}']);
-    let pasted =
-        text.chars().count() >= LONG_TEXT_PASTE_THRESHOLD && !has_control_chars && paste_text(text);
+    let pasted = text.chars().count() >= LONG_TEXT_PASTE_THRESHOLD
+        && !has_control_chars
+        && paste_text(text)?;
     if !pasted {
-        input_sim::type_text_char_by_char(text, TYPE_INTERVAL, KEY_WAIT);
+        input_sim::type_text_char_by_char(text, TYPE_INTERVAL, KEY_WAIT)?;
     }
 
     if press_enter {
-        input_sim::key_tap(VK_RETURN.0, KEY_WAIT);
+        input_sim::key_tap(VK_RETURN.0, KEY_WAIT)?;
     }
+    Ok(())
 }
 
 /// Stashes `text` on the clipboard, pastes via Ctrl+V, then restores the
 /// prior clipboard contents.
-fn paste_text(text: &str) -> bool {
+fn paste_text(text: &str) -> Result<bool, String> {
     let prior = input_sim::get_clipboard_text();
     if !input_sim::set_clipboard_text(text) {
-        return false;
+        return Ok(false);
     }
     std::thread::sleep(PASTE_SETTLE_WAIT);
-    input_sim::chord(&[VK_CONTROL.0, b'V' as u16], KEY_WAIT);
+    let paste_result = input_sim::chord(&[VK_CONTROL.0, b'V' as u16], KEY_WAIT);
     std::thread::sleep(PASTE_SETTLE_WAIT);
     match prior {
         Some(prior) => {
@@ -114,5 +116,6 @@ fn paste_text(text: &str) -> bool {
         }
         None => input_sim::clear_clipboard(),
     }
-    true
+    paste_result?;
+    Ok(true)
 }

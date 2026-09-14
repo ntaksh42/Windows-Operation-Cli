@@ -247,9 +247,14 @@ fn walk_window_with_retry(
     max_retries: u32,
 ) -> WalkWindowResult {
     for attempt in 0..=max_retries {
-        if Instant::now() >= deadline {
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
             return WalkWindowResult::DeadlineExceeded;
-        }
+        };
+        // UIA providers run out-of-process. Bound the next provider transaction
+        // to the remaining Snapshot budget instead of allowing its default
+        // timeout to overrun `timeout_ms`.
+        let timeout_ms = remaining.as_millis().clamp(1, u32::MAX as u128) as u32;
+        let _ = uia::set_transaction_timeout(automation, timeout_ms);
         match uia::walk_window(automation, cache_request, condition, hwnd, reverse_children) {
             Ok(result) => return WalkWindowResult::Success(result),
             Err(_) if attempt < max_retries => {
@@ -985,11 +990,24 @@ pub(crate) fn capture(params: &SnapshotParams) -> Result<SnapshotResult, String>
         screenshot_size_line = Some(if scale < 1.0 {
             let coord_scale = (1.0 / scale * 1_000_000.0).round() / 1_000_000.0;
             format!(
-                "Screenshot Original Size: ({orig_width},{orig_height})\n{}",
-                screenshot::coordinate_scale_text(coord_scale)
+                "Screenshot Original Size: ({orig_width},{orig_height})\n{}\n{}",
+                screenshot::coordinate_scale_text(coord_scale),
+                screenshot::coordinate_transform_text(
+                    coord_scale,
+                    capture_rect.left,
+                    capture_rect.top
+                )
             )
         } else {
-            format!("Screenshot Size: ({},{})", image.width(), image.height())
+            let size = format!("Screenshot Size: ({},{})", image.width(), image.height());
+            if capture_rect.left != 0 || capture_rect.top != 0 {
+                format!(
+                    "{size}\n{}",
+                    screenshot::coordinate_transform_text(1.0, capture_rect.left, capture_rect.top)
+                )
+            } else {
+                size
+            }
         });
     }
     let image_ms = image_start.elapsed().as_secs_f64() * 1000.0;
