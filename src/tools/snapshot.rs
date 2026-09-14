@@ -73,24 +73,48 @@ fn select_scan_targets<'a>(
 ) -> Result<Vec<&'a window::SnapshotWindow>, String> {
     if let Some(query) = options.window.as_deref() {
         let query = query.to_lowercase();
+        // Window titles carry document names, counts, and the application
+        // name ("repo and 6 more pages - Personal - Microsoft Edge"), so a
+        // caller names the part they know. Whole-string `ratio` scores such a
+        // query by how much of the title it fails to cover, which put even a
+        // verbatim prefix of a long title under the cutoff. Score by the best
+        // matching window of the title instead, keeping `ratio` so a query
+        // that does span the whole title still wins over a partial hit.
         let mut scored: Vec<_> = windows
             .iter()
             .map(|candidate| {
-                (
-                    candidate,
-                    crate::fuzzy::ratio(&query, &candidate.title.to_lowercase()),
-                )
+                let title = candidate.title.to_lowercase();
+                let mut score = crate::fuzzy::ratio(&query, &title);
+                // `partial_ratio` slides the shorter string across the longer
+                // one, so a title shorter than the query scores 100 whenever
+                // the title appears anywhere in it — "Claude" would beat
+                // "Claude Settings" for the query "Claude Settings". Trust it
+                // only when the query is the shorter side, which is the case
+                // it exists for: naming part of a long title.
+                if query.chars().count() <= title.chars().count() {
+                    score = score.max(crate::fuzzy::partial_ratio(&query, &title));
+                }
+                (candidate, score)
             })
             .filter(|(_, score)| *score >= 70.0)
             .collect();
-        scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+        // Partial matching scores every title containing the query at 100, so
+        // ties are now common ("GitHub" against two open tabs). Prefer the
+        // shortest title among equals: it is the one the query covers most of,
+        // and therefore the closest thing to what was asked for. Only a tie on
+        // both score and length is genuinely ambiguous.
+        scored.sort_by(|a, b| {
+            b.1.total_cmp(&a.1)
+                .then_with(|| a.0.title.chars().count().cmp(&b.0.title.chars().count()))
+        });
         let Some((best, best_score)) = scored.first() else {
             return Err(format!("Window not found: {query}"));
         };
-        if scored
-            .get(1)
-            .is_some_and(|(_, score)| (*score - *best_score).abs() < f64::EPSILON)
-        {
+        let best_len = best.title.chars().count();
+        if scored.get(1).is_some_and(|(candidate, score)| {
+            (*score - *best_score).abs() < f64::EPSILON
+                && candidate.title.chars().count() == best_len
+        }) {
             return Err(format!("Window query is ambiguous: {query}"));
         }
         let mut application_windows = vec![*best];
@@ -810,15 +834,45 @@ pub(crate) fn capture(params: &SnapshotParams) -> Result<SnapshotResult, String>
             });
 
             let element_count = elements.len();
+            // Every Chromium-family renderer (Chrome, Edge, and the Electron
+            // shells built on them) and Firefox expose the page as a Document
+            // element. An earlier `automation_id == "RootWebArea"` probe never
+            // matched: Chromium does not surface that name through UI
+            // Automation, so the DOM branch found no root and dropped the
+            // window's elements entirely.
             let dom_root = if use_dom && win.is_browser() {
-                elements.iter().position(|el| {
-                    el.automation_id == "RootWebArea"
-                        || (win.class_name == "MozillaWindowClass"
-                            && el.control_type == uia::DOCUMENT_CONTROL_TYPE)
-                })
+                elements
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, el)| el.control_type == uia::DOCUMENT_CONTROL_TYPE)
+                    // Chromium exposes a legacy accessibility bridge — a
+                    // `Chrome_WidgetWin_1` pane holding an empty Document that
+                    // reports full-window bounds. Electron shells surface that
+                    // bridge alongside the real page, and taking the first
+                    // Document found the empty one, whose bounds then filtered
+                    // every actual element away. Choose the Document that
+                    // actually contains elements.
+                    .max_by_key(|(index, el)| {
+                        elements
+                            .iter()
+                            .skip(*index)
+                            .filter(|child| inside_rect(child, &el.rect))
+                            .count()
+                    })
+                    .map(|(index, _)| index)
             } else {
                 None
             };
+            // A Document that contributes nothing must not blank the window:
+            // fall back to the plain element set rather than reporting an
+            // empty tree.
+            let dom_root = dom_root.filter(|index| {
+                let bounds = elements[*index].rect;
+                elements
+                    .iter()
+                    .skip(*index)
+                    .any(|el| inside_rect(el, &bounds) && !el.is_offscreen)
+            });
             let dom_bounds = dom_root.map(|index| elements[index].rect);
             if dom_root.is_some()
                 && dom_bounds.as_ref().is_some_and(|bounds| {
@@ -1167,6 +1221,66 @@ mod tests {
             class_name: "TestWindow".to_string(),
             pid: handle as u32,
         }
+    }
+
+    #[test]
+    fn a_prefix_of_a_long_title_selects_that_window() {
+        // Real case: a 30-character verbatim prefix of a 64-character browser
+        // title scored ~47 under whole-string matching and was reported as
+        // "Window not found" even though the window was open.
+        let windows = vec![
+            snapshot_window(1, "ntaksh42/Windows-Operation-Cli および他 6 ページ - 個人 - Microsoft Edge"),
+            snapshot_window(2, "Microsoft PC Manager"),
+        ];
+        let options = ScanOptions::resolve(
+            None,
+            Some("ntaksh42/Windows-Operation-Cli".to_string()),
+            None,
+        )
+        .unwrap();
+        let selected = select_scan_targets(&options, None, &windows).unwrap();
+        assert_eq!(selected.first().map(|w| w.handle), Some(1));
+    }
+
+    #[test]
+    fn equal_partial_matches_prefer_the_title_the_query_covers_most() {
+        // Both titles contain the query, so both score 100 on partial match.
+        // The shorter title is the better answer, not an ambiguity error.
+        let windows = vec![
+            snapshot_window(1, "Inbox - Gmail - Mozilla Firefox - Personal - Work Profile"),
+            snapshot_window(2, "Gmail"),
+        ];
+        let options =
+            ScanOptions::resolve(None, Some("Gmail".to_string()), None).unwrap();
+        let selected = select_scan_targets(&options, None, &windows).unwrap();
+        assert_eq!(selected.first().map(|w| w.handle), Some(2));
+    }
+
+    #[test]
+    fn a_title_that_is_only_a_fragment_of_the_query_does_not_win() {
+        // Partial matching slides the shorter string across the longer one, so
+        // an unguarded partial score rates "Claude" a perfect match for the
+        // query "Claude Settings" and the shorter title would take it.
+        let windows = vec![
+            snapshot_window(1, "Claude"),
+            snapshot_window(2, "Claude Settings"),
+        ];
+        let options =
+            ScanOptions::resolve(None, Some("Claude Settings".to_string()), None).unwrap();
+        let selected = select_scan_targets(&options, None, &windows).unwrap();
+        assert_eq!(selected.first().map(|w| w.handle), Some(2));
+    }
+
+    #[test]
+    fn identical_titles_are_still_reported_as_ambiguous() {
+        let windows = vec![
+            snapshot_window(1, "Settings"),
+            snapshot_window(2, "Settings"),
+        ];
+        let options =
+            ScanOptions::resolve(None, Some("Settings".to_string()), None).unwrap();
+        let error = select_scan_targets(&options, None, &windows).unwrap_err();
+        assert!(error.contains("ambiguous"), "{error}");
     }
 
     #[test]

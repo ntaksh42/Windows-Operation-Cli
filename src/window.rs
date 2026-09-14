@@ -111,7 +111,21 @@ pub struct SnapshotWindow {
 }
 
 impl SnapshotWindow {
+    /// Whether this window hosts web content whose DOM can be walked.
+    ///
+    /// Chromium hands every renderer window the `Chrome_WidgetWin_1` class,
+    /// so the class covers Chrome and Edge along with the Electron apps built
+    /// on the same engine (VS Code, Slack, Discord) — all of which expose
+    /// their page through the same Document root. Matching on the class
+    /// instead of an executable allowlist keeps Electron working without
+    /// naming each app. Firefox uses its own class and is listed explicitly.
     pub fn is_browser(&self) -> bool {
+        if matches!(
+            self.class_name.as_str(),
+            "Chrome_WidgetWin_1" | "MozillaWindowClass"
+        ) {
+            return true;
+        }
         process_executable_name(self.pid).is_some_and(|name| {
             matches!(name.as_str(), "chrome.exe" | "msedge.exe" | "firefox.exe")
         })
