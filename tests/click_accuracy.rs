@@ -11,12 +11,61 @@ use std::time::Duration;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Gdi::ClientToScreen;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, MSG,
-    PostQuitMessage, RegisterClassW, SetForegroundWindow, ShowWindow, TranslateMessage,
-    WINDOW_EX_STYLE, WM_LBUTTONDOWN, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    ASFW_ANY, AllowSetForegroundWindow, BringWindowToTop, CreateWindowExW, DefWindowProcW,
+    DestroyWindow, DispatchMessageW, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId,
+    HWND_TOP, MSG, PostQuitMessage, RegisterClassW, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+    SetForegroundWindow, SetWindowPos, ShowWindow, TranslateMessage, WINDOW_EX_STYLE,
+    WM_LBUTTONDOWN, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 use windows::core::w;
+
+/// Brings `hwnd` to the foreground, mirroring `window::switch_to`.
+///
+/// A bare `SetForegroundWindow` is refused whenever another process owns the
+/// foreground, which is the normal case when this test runs from a terminal:
+/// the window stayed behind, and the injected click landed on the terminal
+/// instead of here.
+unsafe fn force_foreground(hwnd: HWND) {
+    unsafe {
+        let foreground = GetForegroundWindow();
+        let current_tid = GetCurrentThreadId();
+        let foreground_thread = if foreground.0.is_null() {
+            0
+        } else {
+            GetWindowThreadProcessId(foreground, None)
+        };
+        let target_thread = GetWindowThreadProcessId(hwnd, None);
+
+        let _ = AllowSetForegroundWindow(ASFW_ANY);
+        let mut attached = Vec::new();
+        for thread in [foreground_thread, target_thread] {
+            if thread != 0
+                && thread != current_tid
+                && AttachThreadInput(current_tid, thread, true).as_bool()
+            {
+                attached.push(thread);
+            }
+        }
+
+        let _ = SetForegroundWindow(hwnd);
+        let _ = BringWindowToTop(hwnd);
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_TOP),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+        );
+
+        for thread in attached.into_iter().rev() {
+            let _ = AttachThreadInput(current_tid, thread, false);
+        }
+    }
+}
 
 type ClickSender = Sender<(i32, i32)>;
 
@@ -44,7 +93,7 @@ unsafe extern "system" fn window_proc(
 }
 
 #[test]
-#[ignore = "requires an interactive single-monitor Windows desktop"]
+#[ignore = "requires an interactive Windows desktop session; run with --ignored"]
 fn click_lands_within_two_pixels() {
     let (window_tx, window_rx) = mpsc::channel();
     let (click_tx, click_rx) = mpsc::channel();
@@ -80,7 +129,7 @@ fn click_lands_within_two_pixels() {
         )
         .unwrap();
         let _ = ShowWindow(hwnd, windows::Win32::UI::WindowsAndMessaging::SW_SHOW);
-        let _ = SetForegroundWindow(hwnd);
+        force_foreground(hwnd);
         let mut origin = POINT::default();
         ClientToScreen(hwnd, &mut origin).unwrap();
         window_tx.send((hwnd.0 as isize, origin)).unwrap();
@@ -93,8 +142,27 @@ fn click_lands_within_two_pixels() {
         DestroyWindow(hwnd).unwrap();
     });
 
-    let (_hwnd, origin) = window_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    let (hwnd, origin) = window_rx.recv_timeout(Duration::from_secs(3)).unwrap();
     let expected = (40, 30);
+
+    // Activation is asynchronous: the window manager raises the window after
+    // the creating thread has already reported its origin. Clicking before it
+    // is actually in front sends the input to whatever still covers the point.
+    let target = (origin.x + expected.0, origin.y + expected.1);
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while std::time::Instant::now() < deadline {
+        let hit = unsafe { windows::Win32::UI::WindowsAndMessaging::WindowFromPoint(POINT { x: target.0, y: target.1 }) };
+        if hit.0 as isize == hwnd {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let hit = unsafe { windows::Win32::UI::WindowsAndMessaging::WindowFromPoint(POINT { x: target.0, y: target.1 }) };
+    assert_eq!(
+        hit.0 as isize, hwnd,
+        "the test window never reached the foreground, so click accuracy cannot be measured"
+    );
+
     input_sim::click_once(
         origin.x + expected.0,
         origin.y + expected.1,
