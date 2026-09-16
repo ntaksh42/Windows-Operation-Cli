@@ -54,6 +54,9 @@ pub struct TypeParams {
 /// Types `text` at the resolved location and returns the confirmation
 /// message.
 pub fn type_text(params: TypeParams) -> Result<String, String> {
+    // Tell the human the desktop is being driven; concurrent manual input
+    // steals focus and breaks the capture path.
+    let _overlay = crate::overlay::InputOverlay::show();
     let (x, y) = resolve_point_required(params.loc, params.label)?;
     let clear = opt_bool(&params.clear, false)?;
     let press_enter = opt_bool(&params.press_enter, false)?;
@@ -82,8 +85,7 @@ pub fn type_at(
     }
 
     if clear {
-        input_sim::chord(&[VK_CONTROL.0, b'A' as u16], KEY_WAIT)?;
-        input_sim::key_tap(VK_BACK.0, KEY_WAIT)?;
+        clear_focused_text()?;
     }
 
     let has_control_chars = text.contains(['\n', '\t', '{', '}']);
@@ -97,6 +99,23 @@ pub fn type_at(
     if press_enter {
         input_sim::key_tap(VK_RETURN.0, KEY_WAIT)?;
     }
+    Ok(())
+}
+
+/// Empties the focused control before new text is typed into it.
+///
+/// Prefers the UIA `ValuePattern`, which asks the provider to set an empty
+/// value. The keyboard route below only works when the control implements
+/// select-all itself: a bare Win32 `EDIT` does not, so Ctrl+A selects nothing
+/// and the Backspace removes one character, splicing the new text onto the
+/// remains of the old. The chord stays as the fallback for controls that
+/// expose no writable `ValuePattern`.
+fn clear_focused_text() -> Result<(), String> {
+    if crate::uia::clear_focused_element_value()? {
+        return Ok(());
+    }
+    input_sim::chord(&[VK_CONTROL.0, b'A' as u16], KEY_WAIT)?;
+    input_sim::key_tap(VK_BACK.0, KEY_WAIT)?;
     Ok(())
 }
 

@@ -621,6 +621,43 @@ pub fn invoke_matching_element(
     Ok(action)
 }
 
+/// Clears the focused element's text through `ValuePattern::SetValue`.
+///
+/// The keyboard route (Ctrl+A, Backspace) relies on the focused control
+/// implementing select-all itself. A bare Win32 `EDIT` does not — in a dialog
+/// the dialog manager translates Ctrl+A — so the chord selects nothing and the
+/// Backspace deletes a single character, leaving the old text spliced onto the
+/// new one. Asking the provider to set an empty value has no such dependency.
+///
+/// Returns `Ok(false)` when the focused element exposes no writable
+/// `ValuePattern`, so the caller can fall back to the keyboard route for
+/// controls this cannot serve (a rich-text document, a custom canvas).
+pub fn clear_focused_element_value() -> Result<bool, String> {
+    ensure_com_initialized()?;
+    let automation = create_automation().map_err(|error| error.to_string())?;
+    unsafe {
+        let Ok(element) = automation.GetFocusedElement() else {
+            return Ok(false);
+        };
+        let Ok(pattern) =
+            element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+        else {
+            return Ok(false);
+        };
+        if pattern
+            .CurrentIsReadOnly()
+            .map(|read_only| read_only.as_bool())
+            .unwrap_or(true)
+        {
+            return Ok(false);
+        }
+        match pattern.SetValue(&windows::core::BSTR::from("")) {
+            Ok(()) => Ok(true),
+            Err(_) => Ok(false),
+        }
+    }
+}
+
 pub fn caret_info() -> Result<String, String> {
     ensure_com_initialized()?;
     let automation = create_automation().map_err(|error| error.to_string())?;

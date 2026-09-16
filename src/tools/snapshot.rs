@@ -157,7 +157,10 @@ fn select_scan_targets<'a>(
 }
 
 /// Parameters for the `Snapshot` tool (docs/SPEC.md §6).
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+///
+/// Every field is optional, so `Default` is the "no arguments given" call the
+/// MCP client makes when it sends `{}`.
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 pub struct SnapshotParams {
     #[schemars(description = "UI tree scan scope. Defaults to foreground.")]
     pub scope: Option<SnapshotScope>,
@@ -252,6 +255,39 @@ enum WalkWindowResult {
     Success((uia::RawElement, Vec<uia::RawElement>)),
     Failed,
     DeadlineExceeded,
+}
+
+/// How long to keep re-enumerating while the foreground window is missing
+/// from the scan list, and how long to wait between attempts.
+const ENUMERATION_SETTLE_TIMEOUT: Duration = Duration::from_millis(500);
+const ENUMERATION_SETTLE_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Enumerates the windows Snapshot walks, waiting briefly for a just-created
+/// foreground window to show up.
+///
+/// `GetForegroundWindow` reports a new window as soon as it is activated, but
+/// `EnumWindows` and the virtual-desktop manager only include it a moment
+/// later — measured at roughly 200ms. Enumerating in that gap yields a list
+/// without the very window the caller is trying to scan, and a `foreground`
+/// scan then fails with "No foreground window is available for UI tree
+/// scanning". That gap is exactly the `App(launch)` -> `Snapshot` sequence,
+/// so wait it out instead of reporting a missing window.
+fn enumerate_scan_windows(foreground: Option<&window::WindowInfo>) -> Vec<window::SnapshotWindow> {
+    let deadline = Instant::now() + ENUMERATION_SETTLE_TIMEOUT;
+    loop {
+        let windows = window::list_snapshot_windows();
+        let Some(foreground) = foreground else {
+            return windows;
+        };
+        if windows
+            .iter()
+            .any(|candidate| candidate.handle == foreground.handle)
+            || Instant::now() >= deadline
+        {
+            return windows;
+        }
+        std::thread::sleep(ENUMERATION_SETTLE_INTERVAL);
+    }
 }
 
 fn bounded_retry_delay(now: Instant, deadline: Instant, requested: Duration) -> Option<Duration> {
@@ -765,7 +801,7 @@ pub(crate) fn capture(params: &SnapshotParams) -> Result<SnapshotResult, String>
     let table_windows = window::list_current_windows();
     let foreground = window::foreground_window();
     let walk_windows = if use_ui_tree {
-        window::list_snapshot_windows()
+        enumerate_scan_windows(foreground.as_ref())
     } else {
         Vec::new()
     };
