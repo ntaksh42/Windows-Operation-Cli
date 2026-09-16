@@ -401,49 +401,7 @@ pub fn wait_for_window(pid: Option<u32>, name: &str, timeout: Duration) -> bool 
     }
 }
 
-#[cfg(test)]
-mod occlusion_tests {
-    use super::*;
-
-    #[test]
-    fn a_point_over_another_application_is_occluded() {
-        // The foreground window owns whatever is drawn at its own center, so
-        // any other top-level window claiming that point is behind it.
-        let Some(foreground) = foreground_window() else {
-            return; // no interactive desktop
-        };
-        let Some((x, y, width, height)) = get_window_rect(foreground.handle) else {
-            return;
-        };
-        let (cx, cy) = (x + width / 2, y + height / 2);
-
-        // The foreground window itself is never occluded at its own center.
-        assert!(
-            !is_point_occluded(cx, cy, foreground.handle),
-            "the foreground window must own its own center"
-        );
-
-        // A different top-level window claiming that same point is occluded.
-        let other = list_windows()
-            .into_iter()
-            .find(|w| w.handle != foreground.handle);
-        if let Some(other) = other {
-            assert!(
-                is_point_occluded(cx, cy, other.handle),
-                "a background window must not be treated as clickable where the foreground window covers it"
-            );
-        }
-    }
-
-    #[test]
-    fn a_closed_or_bogus_owner_is_reported_as_occluded() {
-        // An owner handle that no longer resolves cannot own the point.
-        let Some(foreground) = foreground_window() else {
-            return;
-        };
-        let Some((x, y, width, height)) = get_window_rect(foreground.handle) else {
-            return;
-        };
-        assert!(is_point_occluded(x + width / 2, y + height / 2, 1));
-    }
-}
+// Occlusion is covered by `tests/occlusion.rs`, which stacks two windows it
+// owns. The tests that lived here derived their geometry from whatever window
+// happened to be in the foreground and returned early when there was none, so
+// they asserted nothing on a headless CI runner while still reporting success.

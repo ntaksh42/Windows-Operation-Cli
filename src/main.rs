@@ -4,25 +4,7 @@ use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
 
-mod apps;
-mod capture;
-mod display;
-mod fuzzy;
-mod ia2;
-mod input_sim;
-mod keys;
-mod params;
-mod powershell;
-mod server;
-mod state;
-mod tool_policy;
-mod tools;
-mod uia;
-mod vdm;
-mod win;
-mod window;
-
-use server::WindowsOperationCliServer;
+use windows_operation_cli::server::WindowsOperationCliServer;
 
 #[tokio::main]
 async fn main() -> Result<()> {

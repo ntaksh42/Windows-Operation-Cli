@@ -91,6 +91,15 @@ pub fn clear_state() {
     *state_lock().lock().unwrap() = None;
 }
 
+/// The desktop state published by the most recent Snapshot, if any.
+///
+/// The resolve functions answer questions about a single element; integration
+/// tests need the whole published set to assert on what a Snapshot actually
+/// discovered.
+pub fn current_state() -> Option<DesktopState> {
+    state_lock().lock().unwrap().clone()
+}
+
 const EMPTY_STATE_ERROR: &str = "Desktop state is empty. Please call Snapshot first.";
 
 pub fn resolve_element(id: u64) -> Result<ElementNode, String> {
