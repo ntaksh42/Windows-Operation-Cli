@@ -32,6 +32,10 @@ pub fn multi_select(params: MultiSelectParams) -> Result<String, String> {
         return Err("Either locs or labels must be provided.".to_string());
     }
 
+    // Tell the human the desktop is being driven; concurrent manual input
+    // steals focus and breaks the capture path.
+    let _overlay = crate::overlay::InputOverlay::show();
+
     let mut points: Vec<(i32, i32)> = Vec::new();
     if let Some(locs) = params.locs {
         for loc in locs.into_list()? {

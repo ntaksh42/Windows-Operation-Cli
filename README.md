@@ -75,6 +75,7 @@ keep image context and memory usage bounded.
 | `WINDOWS_MCP_DISABLED_TOOLS` | Comma-separated tool names to disable, matched case-insensitively. |
 | `WINDOWS_MCP_AUDIT_LOG` | JSONL audit-log path. Each call records only its timestamp, tool name, and success status. |
 | `WINDOWS_MCP_INPUT_SETTLE_MS` | Delay in milliseconds after input actions. Defaults to `50`; values are clamped to `0`–`5000`. |
+| `WINDOWS_MCP_INPUT_OVERLAY` | Set to `0`, `false`, or `off` to suppress the red border shown while the server injects input. The border marks "hands off the desktop": concurrent manual input steals focus mid-action and invalidates DXGI desktop duplication, which then returns black frames. It is excluded from capture, so it never appears in Screenshot or Snapshot output. |
 
 ## Troubleshooting
 

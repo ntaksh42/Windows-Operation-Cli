@@ -16,6 +16,9 @@ pub struct ShortcutParams {
 /// Presses the `+`-separated keys in `shortcut` together and returns the
 /// confirmation message.
 pub fn shortcut(params: ShortcutParams) -> Result<String, String> {
+    // Tell the human the desktop is being driven; concurrent manual input
+    // steals focus and breaks the capture path.
+    let _overlay = crate::overlay::InputOverlay::show();
     let vks: Vec<u16> = params
         .shortcut
         .split('+')

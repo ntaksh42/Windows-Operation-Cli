@@ -41,6 +41,9 @@ pub struct MoveParams {
 /// confirmation message.
 pub fn move_mouse(params: MoveParams) -> Result<String, String> {
     let drag = opt_bool(&params.drag, false)?;
+    // Tell the human the desktop is being driven; concurrent manual input
+    // steals focus and breaks the capture path.
+    let _overlay = crate::overlay::InputOverlay::show();
 
     // Validation order mirrors the Python reference: loc/label first, then
     // from_loc's shape, then the drag-only-options gate, then (only once

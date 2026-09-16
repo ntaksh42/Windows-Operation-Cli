@@ -73,6 +73,9 @@ pub struct ScrollParams {
 /// returns the confirmation message, or an error string for an invalid
 /// type/direction combination.
 pub fn scroll(params: ScrollParams) -> Result<String, String> {
+    // Tell the human the desktop is being driven; concurrent manual input
+    // steals focus and breaks the capture path.
+    let _overlay = crate::overlay::InputOverlay::show();
     let point = resolve_point_optional(params.loc, params.label)?;
     let scroll_type = params.scroll_type.unwrap_or(ScrollType::Vertical);
     let direction = params.direction.unwrap_or(ScrollDirection::Down);

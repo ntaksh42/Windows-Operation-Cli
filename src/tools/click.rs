@@ -58,6 +58,9 @@ pub fn click(params: ClickParams) -> Result<String, String> {
         return Err("clicks must be 0 (hover), 1 (single), 2 (double), or 3 (triple).".to_string());
     }
 
+    // Tell the human the desktop is being driven; concurrent manual input
+    // steals focus and breaks the capture path.
+    let _overlay = crate::overlay::InputOverlay::show();
     let _modifier = input_sim::ModifierGuard::press(params.modifier.as_deref())?;
 
     if clicks == 0 {
