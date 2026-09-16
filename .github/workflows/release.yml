@@ -1,0 +1,67 @@
+name: Release
+
+on:
+  push:
+    tags: [ "v*" ]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build and publish (e.g. v0.1.0)'
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # Same constraint as the CI workflow: this crate only builds on Windows.
+    runs-on: windows-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Resolve tag
+      id: tag
+      shell: pwsh
+      run: |
+        $tag = if ($env:GITHUB_REF -like 'refs/tags/*') {
+          $env:GITHUB_REF -replace '^refs/tags/', ''
+        } else {
+          '${{ github.event.inputs.tag }}'
+        }
+        "tag=$tag" >> $env:GITHUB_OUTPUT
+
+    - name: Build release binary
+      run: cargo build --release --verbose
+
+    - name: Run tests
+      run: cargo test --release --verbose
+
+    # The archive must be self-contained: someone installing from a release has
+    # no repository checkout, so the skill and installer ship alongside the exe.
+    - name: Stage archive
+      shell: pwsh
+      run: |
+        $stage = 'dist/windows-operation-cli'
+        New-Item -ItemType Directory -Force -Path $stage | Out-Null
+        Copy-Item 'target/release/windows-operation-cli.exe' $stage
+        Copy-Item 'install.ps1' $stage
+        Copy-Item 'README.md' $stage
+        $skill = Join-Path $stage 'skills/windows-operation-cli'
+        New-Item -ItemType Directory -Force -Path $skill | Out-Null
+        Copy-Item '.claude/skills/windows-operation-cli/*' $skill -Recurse -Force
+        Compress-Archive -Path "$stage/*" -DestinationPath 'dist/windows-operation-cli-windows-x64.zip' -Force
+
+    - name: Publish release
+      shell: pwsh
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        gh release create '${{ steps.tag.outputs.tag }}' `
+          'dist/windows-operation-cli-windows-x64.zip' `
+          --repo '${{ github.repository }}' `
+          --title '${{ steps.tag.outputs.tag }}' `
+          --generate-notes

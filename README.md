@@ -4,16 +4,40 @@ Windows desktop automation MCP server (Rust).
 
 ## Install (Claude Code)
 
+No Rust toolchain required - this downloads a prebuilt binary from GitHub
+Releases:
+
+```powershell
+./install.ps1 -FromRelease
+```
+
+Rust is only needed to *build* the binary, never to run it: the compiled exe
+links against the Win32 and UI Automation APIs that ship with Windows, so there
+is no separate runtime to install. Use `-Version v0.1.0` to pin a release
+instead of taking the latest.
+
+To build from source instead (requires Rust and the MSVC toolchain):
+
 ```powershell
 ./install.ps1
 ```
 
-Builds the release binary, copies it to
+Either way the installer copies the binary to
 `%LOCALAPPDATA%\Programs\windows-operation-cli`, installs the bundled skill
 (`.claude/skills/windows-operation-cli`) to `%USERPROFILE%\.claude\skills` so it
 loads in every project, and registers the MCP server in Claude Code's
 user-scope configuration (`claude mcp add --scope user`). Pass `-SkipBuild` to
 reuse an existing `target\release` binary.
+
+## Release
+
+Pushing a `v*` tag builds on Windows and publishes
+`windows-operation-cli-windows-x64.zip` (binary + skill + installer) to GitHub
+Releases, which is what `-FromRelease` downloads.
+
+```powershell
+git tag v0.2.0 && git push origin v0.2.0
+```
 
 ## Build
 
