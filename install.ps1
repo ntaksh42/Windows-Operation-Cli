@@ -32,7 +32,11 @@ Release tag to download with -FromRelease. Defaults to `latest`.
 ./install.ps1 -FromRelease
 Installs the latest prebuilt release without a Rust toolchain.
 #>
-[CmdletBinding()]
+# Every parameter is named-only. Callers that forward arguments as an array
+# (dotfiles' Install-DevTools does: `& $installer @($tool.Args)`) would
+# otherwise bind a switch like -FromRelease positionally to -InstallDir,
+# silently installing to a directory named after the flag.
+[CmdletBinding(PositionalBinding = $false)]
 param(
     [string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Programs\windows-operation-cli'),
     [switch]$SkipBuild,
