@@ -228,6 +228,33 @@ fn notepad_is_capturable() {
 }
 
 /// Calculator: WinUI, and its result is a read-only element — exactly the
+/// Settings is the packaged-app shape at its most awkward: the titled
+/// `ApplicationFrameWindow` and the `CoreWindow` holding the controls live in
+/// different processes, which is what made every such app unreachable by name.
+#[test]
+#[ignore = "requires an interactive Windows desktop session; run with --ignored"]
+fn a_packaged_app_is_reachable_by_its_title() {
+    let _desktop = desktop_lock();
+    let Some(app) = App::launch("cmd", &["/c", "start", "", "ms-settings:"], "設定") else {
+        eprintln!("skipped: Settings did not appear");
+        return;
+    };
+    let result = capture_window("設定");
+    assert_capture_is_usable(&app, "settings", &result);
+
+    // The controls live in the core window, not the frame the title belongs
+    // to, so a capture that only walked the matched window would find none.
+    assert!(
+        result
+            .interactive_nodes
+            .iter()
+            .filter(|node| !node.name.trim().is_empty())
+            .count()
+            > 5,
+        "settings exposed too few named controls to be usable"
+    );
+}
+
 /// text that used to be dropped for every non-browser window.
 #[test]
 #[ignore = "requires an interactive Windows desktop session; run with --ignored"]
