@@ -902,6 +902,8 @@ fn capture_inner(params: &SnapshotParams, needs_text: bool) -> Result<SnapshotRe
     let mut dom_scroll_percent = 0.0;
     let mut window_trees: Vec<WindowTree> = Vec::new();
     let mut uia_truncated = false;
+    // Set when a window's own scan carried the capture past `timeout_ms`.
+    let mut overran_budget = false;
     let mut window_element_base = 0usize;
     // Windows that answered the scan with nothing because this process is not
     // allowed to see into them.
@@ -970,6 +972,15 @@ fn capture_inner(params: &SnapshotParams, needs_text: bool) -> Result<SnapshotRe
                     break;
                 }
             };
+            // The deadline is checked before each window, not during one, so a
+            // single slow provider can carry the scan well past `timeout_ms`
+            // and still return a complete tree — measured at 4.9s against the
+            // 2s default for `msinfo32`. Interrupting the walk would hand back
+            // a half-built tree that looks whole, so the scan is left to
+            // finish and the overrun is reported instead.
+            if Instant::now() > deadline {
+                overran_budget = true;
+            }
 
             let window_label = if !win.title.is_empty() {
                 win.title.clone()
@@ -1422,6 +1433,13 @@ fn capture_inner(params: &SnapshotParams, needs_text: bool) -> Result<SnapshotRe
         if uia_truncated {
             text += &format!(
                 "\nUI Tree Scan: truncated at timeout_ms={}",
+                scan_options.timeout.as_millis()
+            );
+        }
+        if overran_budget && !uia_truncated {
+            text += &format!(
+                "
+UI Tree Scan: completed in longer than timeout_ms={} — one window's                  provider was slower than the budget. The tree is complete; raise                  timeout_ms to stop this being surprising.",
                 scan_options.timeout.as_millis()
             );
         }
