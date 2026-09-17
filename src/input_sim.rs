@@ -536,10 +536,34 @@ pub fn type_text_char_by_char(
     Ok(())
 }
 
+/// How long to keep trying to open the clipboard.
+///
+/// Windows lets one process hold the clipboard at a time, so `OpenClipboard`
+/// fails while another application has it — Office, a browser, and clipboard
+/// history managers all take it briefly and often. A single attempt made
+/// `Type`'s paste fall back to typing, and worse, could leave the user's
+/// clipboard replaced because the restore failed too. The holder releases it
+/// within milliseconds.
+const CLIPBOARD_OPEN_ATTEMPTS: u32 = 10;
+const CLIPBOARD_OPEN_DELAY: Duration = Duration::from_millis(20);
+
+/// Opens the clipboard, retrying while another process holds it.
+unsafe fn open_clipboard_with_retry() -> bool {
+    for attempt in 0..CLIPBOARD_OPEN_ATTEMPTS {
+        if unsafe { OpenClipboard(None) }.is_ok() {
+            return true;
+        }
+        if attempt + 1 < CLIPBOARD_OPEN_ATTEMPTS {
+            sleep(CLIPBOARD_OPEN_DELAY);
+        }
+    }
+    false
+}
+
 /// Reads CF_UNICODETEXT from the clipboard, if present.
 pub fn get_clipboard_text() -> Option<String> {
     unsafe {
-        if OpenClipboard(None).is_err() {
+        if !open_clipboard_with_retry() {
             return None;
         }
         let result = (|| {
@@ -562,7 +586,7 @@ pub fn get_clipboard_text() -> Option<String> {
 /// success.
 pub fn set_clipboard_text(text: &str) -> bool {
     unsafe {
-        if OpenClipboard(None).is_err() {
+        if !open_clipboard_with_retry() {
             return false;
         }
         let ok = (|| {
@@ -597,7 +621,7 @@ pub fn set_clipboard_text(text: &str) -> bool {
 /// Restores the clipboard to an empty state.
 pub fn clear_clipboard() {
     unsafe {
-        if OpenClipboard(None).is_ok() {
+        if open_clipboard_with_retry() {
             let _ = EmptyClipboard();
             let _ = CloseClipboard();
         }
