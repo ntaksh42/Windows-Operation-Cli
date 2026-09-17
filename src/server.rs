@@ -317,7 +317,7 @@ impl WindowsOperationCliServer {
 
     #[tool(
         name = "Snapshot",
-        description = "Captures desktop state and a structured UI accessibility map. UI tree scanning defaults to the foreground window; use window for one fuzzy title match or scope=all for whole-desktop discovery. Element lines include generation-scoped ids and supported actions for InvokeElement. use_vision=true adds an annotated screenshot. timeout_ms (default 2000, range 100-30000) bounds the total UIA scan.",
+        description = "Captures desktop state and a structured UI accessibility map. UI tree scanning defaults to the foreground window; use window for one fuzzy title match or scope=all for whole-desktop discovery. Element lines include generation-scoped ids and supported actions for InvokeElement. use_vision=true adds an annotated screenshot. timeout_ms (range 100-30000) bounds the total UIA scan; it defaults to 2000 for a single window and 8000 for scope=all, which has every window to walk.",
         annotations(read_only_hint = true, destructive_hint = false)
     )]
     async fn snapshot(

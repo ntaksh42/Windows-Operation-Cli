@@ -25,6 +25,12 @@ use crate::tools::screenshot;
 use crate::{capture, display, ia2, state, uia, vdm, window};
 
 const DEFAULT_UIA_TIMEOUT_MS: u64 = 2_000;
+/// A whole-desktop sweep walks every window rather than one, so the same
+/// budget truncates it. Measured on a desktop of 22 windows: the sweep
+/// completes in about 1.8s, which the 2s default clipped almost every time —
+/// the caller got a partial tree and a "truncated" note for a scan that was
+/// essentially done. The larger default is for the work, not for slack.
+const DEFAULT_ALL_SCOPE_TIMEOUT_MS: u64 = 8_000;
 const MIN_UIA_TIMEOUT_MS: u64 = 100;
 const MAX_UIA_TIMEOUT_MS: u64 = 30_000;
 
@@ -52,7 +58,10 @@ impl ScanOptions {
         if scope == SnapshotScope::All && window.is_some() {
             return Err("window cannot be combined with scope=all".to_string());
         }
-        let timeout_ms = timeout_ms.unwrap_or(DEFAULT_UIA_TIMEOUT_MS);
+        let timeout_ms = timeout_ms.unwrap_or(match scope {
+            SnapshotScope::All => DEFAULT_ALL_SCOPE_TIMEOUT_MS,
+            SnapshotScope::Foreground => DEFAULT_UIA_TIMEOUT_MS,
+        });
         if !(MIN_UIA_TIMEOUT_MS..=MAX_UIA_TIMEOUT_MS).contains(&timeout_ms) {
             return Err(format!(
                 "timeout_ms must be between {MIN_UIA_TIMEOUT_MS} and {MAX_UIA_TIMEOUT_MS}"
@@ -166,7 +175,9 @@ pub struct SnapshotParams {
     pub scope: Option<SnapshotScope>,
     #[schemars(description = "Fuzzy title query for scanning one explicit window.")]
     pub window: Option<String>,
-    #[schemars(description = "Total UIA scan deadline in milliseconds (100-30000).")]
+    #[schemars(
+        description = "Total UIA scan deadline in milliseconds (100-30000). Defaults to 2000 for a single window, 8000 for scope=all."
+    )]
     pub timeout_ms: Option<u64>,
     #[schemars(description = "Include a PNG screenshot in the response. Defaults to false.")]
     pub use_vision: Option<BoolOrString>,
@@ -204,7 +215,7 @@ pub struct SnapshotOutput {
 
 /// Internal capture result: the public [`SnapshotOutput`] plus the raw
 /// element lists WaitFor polls and Snapshot writes into `state.rs`.
-pub(crate) struct SnapshotResult {
+pub struct SnapshotResult {
     pub generation: u32,
     pub text: String,
     pub png_bytes: Option<Vec<u8>>,
@@ -370,23 +381,55 @@ const STACKED_NODE_TOLERANCE: i32 = 12;
 /// which is not always the thing that responds to a click. Keep the first
 /// occurrence, which is the outermost element in document order and the one
 /// whose bounds the later duplicate sits inside.
+///
+/// Two same-named nodes of *different* control types merge when they are
+/// merely close: that is the wrapper case — a `listitem` holding a
+/// `hyperlink`, a button inside its own `group`. Two of the *same* type merge
+/// only when they sit at essentially the same point, because a row of
+/// same-typed controls sharing a name (a toolbar of `button`s labelled "More",
+/// icons 16px apart) is a set of genuinely distinct targets, while a provider
+/// reporting one control twice puts both copies on the identical pixel — which
+/// Files' address bar and filename field both do.
+///
+/// Candidates are grouped by name rather than compared against everything kept
+/// so far. The scan used to be quadratic, which a DOM capture makes expensive:
+/// `use_dom=true` feeds this every text node on the page.
+struct KeptNode {
+    center: (i32, i32),
+    control_type: String,
+}
+
+/// How far apart two nodes of the same type and name can sit and still be one
+/// control the provider reported twice, rather than two adjacent controls.
+const EXACT_DUPLICATE_TOLERANCE: i32 = 2;
+
 fn dedupe_stacked_nodes(nodes: &mut Vec<state::ElementNode>) {
-    let mut kept: Vec<(String, (i32, i32))> = Vec::with_capacity(nodes.len());
+    // Keyed by name, so a candidate is only compared against the handful of
+    // nodes sharing its name instead of everything kept so far.
+    let mut kept: std::collections::HashMap<String, Vec<KeptNode>> =
+        std::collections::HashMap::new();
     nodes.retain(|node| {
         let name = node.name.trim();
         if name.is_empty() {
             return true;
         }
         let (x, y) = node.center;
-        let duplicate = kept.iter().any(|(kept_name, (kept_x, kept_y))| {
-            kept_name == name
-                && (kept_x - x).abs() <= STACKED_NODE_TOLERANCE
-                && (kept_y - y).abs() <= STACKED_NODE_TOLERANCE
+        let entries = kept.entry(name.to_string()).or_default();
+        let duplicate = entries.iter().any(|kept| {
+            let tolerance = if kept.control_type == node.control_type {
+                EXACT_DUPLICATE_TOLERANCE
+            } else {
+                STACKED_NODE_TOLERANCE
+            };
+            (kept.center.0 - x).abs() <= tolerance && (kept.center.1 - y).abs() <= tolerance
         });
         if duplicate {
             return false;
         }
-        kept.push((name.to_string(), (x, y)));
+        entries.push(KeptNode {
+            center: (x, y),
+            control_type: node.control_type.clone(),
+        });
         true
     });
 }
@@ -767,7 +810,18 @@ fn draw_annotations(
 /// `use_ui_tree`), the screenshot + annotation (if `use_vision`), and
 /// assembles the response text. Returns a caller-facing error message (not
 /// yet wrapped with "Error capturing desktop state: ...").
-pub(crate) fn capture(params: &SnapshotParams) -> Result<SnapshotResult, String> {
+pub fn capture(params: &SnapshotParams) -> Result<SnapshotResult, String> {
+    capture_inner(params, true)
+}
+
+/// A capture for a caller that reads the element lists rather than the
+/// rendered response — `WaitFor`, polling several times a second. Skips the
+/// table, tree and desktop-listing formatting, which that caller discards.
+pub fn capture_for_polling(params: &SnapshotParams) -> Result<SnapshotResult, String> {
+    capture_inner(params, false)
+}
+
+fn capture_inner(params: &SnapshotParams, needs_text: bool) -> Result<SnapshotResult, String> {
     let generation = state::next_generation();
     let scan_options =
         ScanOptions::resolve(params.scope, params.window.clone(), params.timeout_ms)?;
@@ -797,14 +851,19 @@ pub(crate) fn capture(params: &SnapshotParams) -> Result<SnapshotResult, String>
     let total_start = Instant::now();
 
     // --- Window enumeration ---
+    // One `EnumWindows` pass feeds both the UIA walk and the response table:
+    // the table list is a filtered view of the scan list (see
+    // `window::windows_for_table`), so enumerating twice only duplicated work.
     let window_start = Instant::now();
-    let table_windows = window::list_current_windows();
     let foreground = window::foreground_window();
+    // Waiting for a just-activated window to appear only matters for the UIA
+    // walk; a screenshot-only capture takes the list as it stands.
     let walk_windows = if use_ui_tree {
         enumerate_scan_windows(foreground.as_ref())
     } else {
-        Vec::new()
+        window::list_snapshot_windows()
     };
+    let table_windows = window::windows_for_table(&walk_windows);
     let window_ms = window_start.elapsed().as_secs_f64() * 1000.0;
 
     // --- UIA tree walk ---
@@ -817,11 +876,19 @@ pub(crate) fn capture(params: &SnapshotParams) -> Result<SnapshotResult, String>
     let mut window_trees: Vec<WindowTree> = Vec::new();
     let mut uia_truncated = false;
     let mut window_element_base = 0usize;
+    // Windows that answered the scan with nothing because this process is not
+    // allowed to see into them.
+    let mut blocked_windows: Vec<String> = Vec::new();
 
     if use_ui_tree && !walk_windows.is_empty() {
         uia::ensure_com_initialized()?;
         let automation = uia::create_automation().map_err(|e| e.to_string())?;
-        let condition = uia::build_condition(&automation).map_err(|e| e.to_string())?;
+        // A whole-desktop sweep is a "which window do I want" question, and
+        // collecting every window's text for it nearly doubles the scan. The
+        // foreground capture that follows picks the text up.
+        let collect_text = scan_options.scope != SnapshotScope::All;
+        let condition =
+            uia::build_condition(&automation, collect_text).map_err(|e| e.to_string())?;
         let cache_request =
             uia::build_cache_request(&automation, &condition).map_err(|e| e.to_string())?;
         let dom_resources = if use_dom {
@@ -884,9 +951,41 @@ pub(crate) fn capture(params: &SnapshotParams) -> Result<SnapshotResult, String>
             } else {
                 win.class_name.clone()
             };
-            if elements.is_empty() || window_label.trim().contains("Overlay") {
+            if window_label.trim().contains("Overlay") {
                 continue;
             }
+            // An elevated window looks much like an empty one through UI
+            // Automation: the provider answers, and reports its title bar and
+            // nothing else. Saying which it was is the difference between a
+            // caller retrying forever and one that knows to restart the
+            // server elevated.
+            // "Nothing usable" means no control to act on and no text to read.
+            // A window showing only a message still has something to report,
+            // so text counts — but the window and title-bar elements do not:
+            // they are the frame, and they are exactly what an elevated
+            // window exposes when its contents are hidden.
+            let nothing_usable = elements.iter().all(|el| {
+                let is_frame = el.control_type == uia::WINDOW_CONTROL_TYPE
+                    || el.control_type == uia::TITLE_BAR_CONTROL_TYPE;
+                is_frame
+                    || (!uia::INTERACTIVE_CONTROL_TYPES.contains(&el.control_type)
+                        && !el.is_scrollable
+                        && el.name.trim().is_empty())
+            });
+            if nothing_usable {
+                if !crate::win::is_elevated() && crate::win::runs_at_higher_integrity(win.pid) {
+                    blocked_windows.push(window_label);
+                }
+                continue;
+            }
+
+            // A window that has put up a modal dialog disables itself, and
+            // every click on it is discarded. UI Automation does not pass that
+            // on — the disabled window's controls keep reporting
+            // `IsEnabled = true` — so the capture would keep offering buttons
+            // that do nothing. Its text is still worth reading, so this only
+            // moves the controls out of the actionable list.
+            let window_accepts_input = window::is_enabled(win.handle);
 
             let mut local_interactive: Vec<state::ElementNode> = Vec::new();
             let mut local_scrollable: Vec<state::ElementNode> = Vec::new();
@@ -989,11 +1088,20 @@ pub(crate) fn capture(params: &SnapshotParams) -> Result<SnapshotResult, String>
                     continue;
                 };
                 let is_interactive_type = uia::INTERACTIVE_CONTROL_TYPES.contains(&el.control_type);
-                if is_interactive_type && el.is_enabled && !el.is_offscreen {
+                if is_interactive_type && el.is_enabled && window_accepts_input && !el.is_offscreen
+                {
                     local_interactive.push(node);
                 } else if el.is_scrollable && !el.is_offscreen {
                     local_scrollable.push(node);
-                } else if dom_root.is_some() && !el.is_offscreen && !el.name.trim().is_empty() {
+                } else if (collect_text || dom_root.is_some())
+                    && !el.is_offscreen
+                    && !el.name.trim().is_empty()
+                {
+                    // Text the window is showing: a calculator's result, a
+                    // dialog's message, a status line. This used to be
+                    // gated on `dom_root.is_some()`, so it only ever
+                    // applied to browser pages — every ordinary desktop app
+                    // reported its buttons and none of its readable state.
                     local_informative.push(node);
                 }
             }
@@ -1183,6 +1291,29 @@ pub(crate) fn capture(params: &SnapshotParams) -> Result<SnapshotResult, String>
     let image_ms = image_start.elapsed().as_secs_f64() * 1000.0;
 
     // --- Response text assembly ---
+    // `WaitFor` polls this several times a second and reads only the node
+    // lists and window titles, never the rendered text. Building the tables,
+    // the UI tree and the virtual-desktop listing for it re-did that work on
+    // every poll for output nobody read.
+    if !needs_text {
+        return Ok(SnapshotResult {
+            generation,
+            text: String::new(),
+            png_bytes,
+            interactive_nodes,
+            scrollable_nodes,
+            informative_nodes,
+            dom_found,
+            dom_scroll_percent,
+            focused_window_title: foreground.as_ref().map(|w| w.title.clone()),
+            window_titles: table_windows
+                .iter()
+                .map(|w| w.title.clone())
+                .chain(foreground.as_ref().map(|w| w.title.clone()))
+                .collect(),
+        });
+    }
+
     let (cx, cy) = screenshot::cursor_position();
     let mut text = format!("Cursor Position: ({cx}, {cy})\n");
 
@@ -1267,6 +1398,16 @@ pub(crate) fn capture(params: &SnapshotParams) -> Result<SnapshotResult, String>
                 scan_options.timeout.as_millis()
             );
         }
+        if !blocked_windows.is_empty() {
+            blocked_windows.sort();
+            blocked_windows.dedup();
+            text += &format!(
+                "\nElevated windows (not readable from this session): {}. \
+                 Their contents are hidden by Windows UI privilege isolation; \
+                 restart the server elevated to inspect them.",
+                blocked_windows.join(", ")
+            );
+        }
     } else {
         text += "\n\nUI Tree: Skipped for fast screenshot-only capture. Call Snapshot when you need interactive or scrollable elements.\n";
     }
@@ -1297,12 +1438,12 @@ mod tests {
     use super::*;
 
     fn snapshot_window(handle: isize, title: &str) -> window::SnapshotWindow {
-        window::SnapshotWindow {
+        window::SnapshotWindow::new(
             handle,
-            title: title.to_string(),
-            class_name: "TestWindow".to_string(),
-            pid: handle as u32,
-        }
+            title.to_string(),
+            "TestWindow".to_string(),
+            handle as u32,
+        )
     }
 
     fn named_node(name: &str, control_type: &str, center: (i32, i32)) -> state::ElementNode {
@@ -1348,6 +1489,34 @@ mod tests {
         ];
         dedupe_stacked_nodes(&mut nodes);
         assert_eq!(nodes.len(), 2);
+    }
+
+    #[test]
+    fn one_control_reported_twice_at_the_same_point_is_listed_once() {
+        // Measured in Files: the address bar and the filename field each come
+        // back as two `edit` nodes with identical names and identical centres.
+        // Listing both gives the caller two ids for one control.
+        let mut nodes = vec![
+            named_node("移動先のパスを入力…", "edit", (1018, 67)),
+            named_node("移動先のパスを入力…", "edit", (1018, 67)),
+        ];
+        dedupe_stacked_nodes(&mut nodes);
+        assert_eq!(nodes.len(), 1);
+    }
+
+    #[test]
+    fn adjacent_same_typed_controls_sharing_a_name_are_all_kept() {
+        // A toolbar packs same-named icon buttons closer together than the
+        // stacking tolerance. They are separate targets, not one control the
+        // provider reported twice — only a wrapper/child pair is that, and a
+        // wrapper is always a different control type than what it wraps.
+        let mut nodes = vec![
+            named_node("More", "button", (100, 40)),
+            named_node("More", "button", (118, 40)),
+            named_node("More", "button", (136, 40)),
+        ];
+        dedupe_stacked_nodes(&mut nodes);
+        assert_eq!(nodes.len(), 3, "same-typed neighbours are distinct controls");
     }
 
     #[test]
@@ -1442,6 +1611,29 @@ mod tests {
     }
 
     #[test]
+    fn a_whole_desktop_sweep_gets_a_larger_default_budget() {
+        // One window finishes well inside 2s; every window does not. Measured
+        // at ~1.8s of work, which the foreground default clipped almost every
+        // time.
+        let foreground = ScanOptions::resolve(None, None, None).unwrap();
+        let sweep = ScanOptions::resolve(Some(SnapshotScope::All), None, None).unwrap();
+        assert_eq!(foreground.timeout.as_millis(), 2_000);
+        assert!(
+            sweep.timeout > foreground.timeout,
+            "scope=all needs more than the foreground budget, got {:?}",
+            sweep.timeout
+        );
+    }
+
+    #[test]
+    fn an_explicit_timeout_still_wins_for_either_scope() {
+        for scope in [None, Some(SnapshotScope::All)] {
+            let options = ScanOptions::resolve(scope, None, Some(500)).unwrap();
+            assert_eq!(options.timeout.as_millis(), 500);
+        }
+    }
+
+    #[test]
     fn retry_delay_never_exceeds_the_global_deadline() {
         let now = Instant::now();
         let deadline = now + Duration::from_millis(100);
@@ -1511,12 +1703,7 @@ mod tests {
     fn explicit_window_includes_related_popup_from_the_same_process() {
         let windows = vec![
             snapshot_window(1, "Claude"),
-            window::SnapshotWindow {
-                handle: 2,
-                title: String::new(),
-                class_name: "Popup".to_string(),
-                pid: 1,
-            },
+            window::SnapshotWindow::new(2, String::new(), "Popup".to_string(), 1),
             snapshot_window(3, "Edge"),
         ];
         let options = ScanOptions::resolve(None, Some("Claude".to_string()), None).unwrap();
