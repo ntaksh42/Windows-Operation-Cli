@@ -4,6 +4,7 @@
 //! This works directly against Win32 top-level windows via `EnumWindows`
 //! rather than the UIA-based Snapshot tree service.
 
+use std::cell::OnceCell;
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, POINT, RECT};
@@ -11,6 +12,7 @@ use windows::Win32::System::Threading::{
     AttachThreadInput, GetCurrentThreadId, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     QueryFullProcessImageNameW,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
 use windows::Win32::UI::WindowsAndMessaging::{
     ASFW_ANY, AllowSetForegroundWindow, BringWindowToTop, EnumWindows, FindWindowW, GA_ROOT,
     GetAncestor, GetClassNameW, GetForegroundWindow, GetWindowRect, GetWindowTextLengthW,
@@ -45,11 +47,26 @@ pub fn list_windows() -> Vec<WindowInfo> {
 
 /// Visible titled windows belonging to the active virtual desktop.
 pub fn list_current_windows() -> Vec<WindowInfo> {
-    list_windows()
-        .into_iter()
-        .filter(|window| {
-            crate::vdm::is_window_on_current_desktop(window.handle)
-                && !window.title.trim().contains("Overlay")
+    windows_for_table(&list_snapshot_windows())
+}
+
+/// Narrows a Snapshot walk list down to the windows the response table shows.
+///
+/// [`list_snapshot_windows`] is a superset of this: it additionally keeps
+/// empty-titled windows and the shell's own taskbar/desktop windows, which
+/// the UIA walk needs but the table does not. Snapshot used to build the two
+/// lists with independent `EnumWindows` passes; deriving one from the other
+/// halves the enumeration work per capture.
+pub fn windows_for_table(scanned: &[SnapshotWindow]) -> Vec<WindowInfo> {
+    scanned
+        .iter()
+        .filter(|window| !window.title.is_empty())
+        .filter(|window| !EXCLUDED_CLASSES.contains(&window.class_name.as_str()))
+        .filter(|window| !window.title.trim().contains("Overlay"))
+        .map(|window| WindowInfo {
+            handle: window.handle,
+            title: window.title.clone(),
+            pid: window.pid,
         })
         .collect()
 }
@@ -108,9 +125,33 @@ pub struct SnapshotWindow {
     pub title: String,
     pub class_name: String,
     pub pid: u32,
+    /// The owning executable's file name, resolved once on first use.
+    ///
+    /// `is_browser` and `is_firefox` are called several times per window
+    /// inside Snapshot's scan loop; resolving the name on every call meant an
+    /// `OpenProcess` and a 32KiB allocation each time. The inner `None` is a
+    /// resolved "the process could not be queried", distinct from the outer
+    /// "not looked up yet".
+    executable: OnceCell<Option<String>>,
 }
 
 impl SnapshotWindow {
+    pub fn new(handle: isize, title: String, class_name: String, pid: u32) -> Self {
+        Self {
+            handle,
+            title,
+            class_name,
+            pid,
+            executable: OnceCell::new(),
+        }
+    }
+
+    fn executable_name(&self) -> Option<&str> {
+        self.executable
+            .get_or_init(|| process_executable_name(self.pid))
+            .as_deref()
+    }
+
     /// Whether this window hosts web content whose DOM can be walked.
     ///
     /// Chromium hands every renderer window the `Chrome_WidgetWin_1` class,
@@ -126,30 +167,40 @@ impl SnapshotWindow {
         ) {
             return true;
         }
-        process_executable_name(self.pid).is_some_and(|name| {
-            matches!(name.as_str(), "chrome.exe" | "msedge.exe" | "firefox.exe")
-        })
+        self.executable_name()
+            .is_some_and(|name| matches!(name, "chrome.exe" | "msedge.exe" | "firefox.exe"))
     }
 
     pub fn is_firefox(&self) -> bool {
-        process_executable_name(self.pid).as_deref() == Some("firefox.exe")
+        self.executable_name() == Some("firefox.exe")
     }
 }
 
 fn process_executable_name(pid: u32) -> Option<String> {
     unsafe {
         let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
-        let mut buffer = vec![0u16; 32_768];
-        let mut length = buffer.len() as u32;
-        let result = QueryFullProcessImageNameW(
-            process,
-            Default::default(),
-            PWSTR(buffer.as_mut_ptr()),
-            &mut length,
-        );
+        // `QueryFullProcessImageNameW` reports the length it needs, so start
+        // at MAX_PATH and grow only for the rare longer path rather than
+        // allocating 32KiB for every window.
+        let mut buffer = vec![0u16; 260];
+        let name = loop {
+            let mut length = buffer.len() as u32;
+            let result = QueryFullProcessImageNameW(
+                process,
+                Default::default(),
+                PWSTR(buffer.as_mut_ptr()),
+                &mut length,
+            );
+            if result.is_ok() {
+                break Some(String::from_utf16_lossy(&buffer[..length as usize]));
+            }
+            if buffer.len() >= 32_768 {
+                break None;
+            }
+            buffer.resize(buffer.len() * 4, 0);
+        };
         let _ = CloseHandle(process);
-        result.ok()?;
-        std::path::Path::new(&String::from_utf16_lossy(&buffer[..length as usize]))
+        std::path::Path::new(&name?)
             .file_name()
             .and_then(|name| name.to_str())
             .map(|name| name.to_ascii_lowercase())
@@ -166,12 +217,12 @@ unsafe extern "system" fn enum_snapshot_proc(hwnd: HWND, lparam: LPARAM) -> BOOL
         }
         let mut pid = 0u32;
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        windows.push(SnapshotWindow {
-            handle: hwnd.0 as isize,
-            title: window_title(hwnd),
-            class_name: window_class_name(hwnd),
+        windows.push(SnapshotWindow::new(
+            hwnd.0 as isize,
+            window_title(hwnd),
+            window_class_name(hwnd),
             pid,
-        });
+        ));
         true.into()
     }
 }
@@ -199,16 +250,14 @@ pub fn list_snapshot_windows() -> Vec<SnapshotWindow> {
         if let Some(hwnd) = find_window_by_class(class_name)
             && !windows.iter().any(|w| w.handle == hwnd.0 as isize)
         {
-            windows.push(SnapshotWindow {
-                handle: hwnd.0 as isize,
-                title: window_title(hwnd),
-                class_name: class_name.to_string(),
-                pid: {
-                    let mut pid = 0;
-                    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
-                    pid
-                },
-            });
+            let mut pid = 0;
+            unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+            windows.push(SnapshotWindow::new(
+                hwnd.0 as isize,
+                window_title(hwnd),
+                class_name.to_string(),
+                pid,
+            ));
         }
     }
     windows
@@ -283,6 +332,17 @@ pub fn foreground_window() -> Option<WindowInfo> {
 
 pub fn is_minimized(handle: isize) -> bool {
     unsafe { IsIconic(HWND(handle as *mut _)).as_bool() }
+}
+
+/// Whether a window can currently receive input.
+///
+/// A window that put up a modal dialog disables itself, and every click on it
+/// is discarded. UI Automation does not pass that on: the disabled window's
+/// child controls keep reporting `IsEnabled = true`, so a capture offers
+/// buttons that do nothing when clicked. Ask Win32 about the top-level window
+/// instead.
+pub fn is_enabled(handle: isize) -> bool {
+    unsafe { IsWindowEnabled(HWND(handle as *mut _)).as_bool() }
 }
 
 pub fn is_maximized(handle: isize) -> bool {
