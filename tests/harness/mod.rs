@@ -49,6 +49,7 @@ pub const ID_EDIT: i32 = 1002;
 pub const ID_CHECKBOX: i32 = 1003;
 pub const ID_LISTBOX: i32 = 1004;
 pub const ID_STATUS: i32 = 1005;
+pub const ID_EDIT2: i32 = 1006;
 
 /// Control captions, used by tests to find the element in a Snapshot tree.
 pub const BUTTON_TEXT: &str = "Run Task";
@@ -219,6 +220,20 @@ unsafe extern "system" fn window_proc(
     }
 }
 
+/// Reads a control's text.
+fn control_text(handle: isize) -> String {
+    let hwnd = HWND(handle as *mut _);
+    unsafe {
+        let len = GetWindowTextLengthW(hwnd);
+        if len <= 0 {
+            return String::new();
+        }
+        let mut buffer = vec![0u16; len as usize + 1];
+        let copied = GetWindowTextW(hwnd, &mut buffer).max(0) as usize;
+        String::from_utf16_lossy(&buffer[..copied])
+    }
+}
+
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
 }
@@ -275,6 +290,7 @@ pub struct TestApp {
     hwnd: isize,
     button: isize,
     edit: isize,
+    edit2: isize,
     checkbox: isize,
     listbox: isize,
     client_origin: POINT,
@@ -290,6 +306,8 @@ pub mod layout {
     pub const CHECKBOX: (i32, i32, i32, i32) = (20, 110, 160, 24);
     pub const LISTBOX: (i32, i32, i32, i32) = (20, 145, 160, 80);
     pub const STATUS: (i32, i32, i32, i32) = (20, 235, 260, 20);
+    /// A second edit field, so `MultiEdit` has more than one target to fill.
+    pub const EDIT2: (i32, i32, i32, i32) = (200, 110, 200, 26);
 }
 
 impl TestApp {
@@ -372,6 +390,15 @@ impl TestApp {
                 layout::EDIT,
                 ID_EDIT,
             );
+            let edit2 = create_child(
+                instance,
+                hwnd,
+                w!("EDIT"),
+                "",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER,
+                layout::EDIT2,
+                ID_EDIT2,
+            );
             let checkbox = create_child(
                 instance,
                 hwnd,
@@ -427,6 +454,7 @@ impl TestApp {
                     hwnd.0 as isize,
                     button.0 as isize,
                     edit.0 as isize,
+                    edit2.0 as isize,
                     checkbox.0 as isize,
                     listbox.0 as isize,
                     origin,
@@ -444,13 +472,14 @@ impl TestApp {
             }
         });
 
-        let (hwnd, button, edit, checkbox, listbox, client_origin) =
+        let (hwnd, button, edit, edit2, checkbox, listbox, client_origin) =
             window_rx.recv_timeout(Duration::from_secs(5)).ok()?;
 
         let app = Self {
             hwnd,
             button,
             edit,
+            edit2,
             checkbox,
             listbox,
             client_origin,
@@ -475,6 +504,16 @@ impl TestApp {
 
     pub fn edit_hwnd(&self) -> isize {
         self.edit
+    }
+
+    /// The second edit field, so a test can fill more than one.
+    pub fn edit2_hwnd(&self) -> isize {
+        self.edit2
+    }
+
+    /// Current text of the second edit control.
+    pub fn edit2_text(&self) -> String {
+        control_text(self.edit2)
     }
 
     pub fn checkbox_hwnd(&self) -> isize {
@@ -597,16 +636,7 @@ impl TestApp {
 
     /// Current text of the edit control, read straight from the control.
     pub fn edit_text(&self) -> String {
-        let hwnd = HWND(self.edit as *mut _);
-        unsafe {
-            let len = GetWindowTextLengthW(hwnd);
-            if len <= 0 {
-                return String::new();
-            }
-            let mut buffer = vec![0u16; len as usize + 1];
-            let copied = GetWindowTextW(hwnd, &mut buffer).max(0) as usize;
-            String::from_utf16_lossy(&buffer[..copied])
-        }
+        control_text(self.edit)
     }
 
     /// Whether the checkbox is currently checked, read from the control.
