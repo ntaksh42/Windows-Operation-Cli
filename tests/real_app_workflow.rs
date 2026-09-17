@@ -164,9 +164,10 @@ fn text_typed_into_notepad_registers_as_an_edit() {
 
 /// Long text has to arrive whole in an editor that has room for it.
 ///
-/// The harness's single-line field cannot check this — measured, it stops a
-/// 608-character paste at 29 whether the paste comes from this tool or a
-/// hand-typed Ctrl+V, so the limit is the control's. Notepad holds all of it.
+/// `typing_edges.rs` covers the same ground against the harness. This is the
+/// version that matters more: Notepad is a real multi-line editor with its own
+/// provider, so it exercises the paste against a target the tests do not
+/// control.
 #[test]
 #[ignore = "requires an interactive Windows desktop session and Notepad; run with --ignored"]
 fn long_text_arrives_whole_in_a_real_editor() {

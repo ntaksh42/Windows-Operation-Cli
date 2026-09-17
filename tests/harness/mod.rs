@@ -381,12 +381,24 @@ impl TestApp {
                 layout::BUTTON,
                 ID_BUTTON,
             );
+            // ES_AUTOHSCROLL, without which a single-line EDIT accepts only as
+            // much text as fits its visible width and silently drops the rest.
+            // That is a property of this window, not of the tools under test,
+            // and it made long or non-Latin text look like a delivery bug:
+            // measured at 240px, 36 ASCII characters arrived as 32 and 20
+            // Japanese ones as 14, since the cut follows rendered width rather
+            // than length.
+            let edit_style = WS_CHILD
+                | WS_VISIBLE
+                | WS_TABSTOP
+                | WS_BORDER
+                | windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE(0x0000_0080);
             let edit = create_child(
                 instance,
                 hwnd,
                 w!("EDIT"),
                 "",
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER,
+                edit_style,
                 layout::EDIT,
                 ID_EDIT,
             );
@@ -395,7 +407,7 @@ impl TestApp {
                 hwnd,
                 w!("EDIT"),
                 "",
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER,
+                edit_style,
                 layout::EDIT2,
                 ID_EDIT2,
             );

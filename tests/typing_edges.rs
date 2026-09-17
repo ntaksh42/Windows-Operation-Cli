@@ -121,11 +121,11 @@ fn clearing_with_no_text_empties_the_field() {
 
 /// Text long enough to take the clipboard path has to arrive whole.
 ///
-/// The harness's single-line `EDIT` is not the place to check this: measured
-/// against it, a 608-character paste stops at 29 whether it goes through this
-/// tool or a hand-typed Ctrl+V, so the limit is the control's and asserting
-/// on it would measure comctl. `tests/real_app_workflow.rs` covers the same
-/// text against Notepad, which holds all 608.
+/// This used to assert on twenty characters, because a longer paste against
+/// the harness was cut short and that was read as a limit of the control.
+/// It was not: the field was created without `ES_AUTOHSCROLL`, so it took
+/// only what fit its visible width. With the style set it holds the whole
+/// string, and the test can measure what it was written to measure.
 #[test]
 #[ignore = "requires an interactive Windows desktop session; run with --ignored"]
 fn text_over_the_paste_threshold_arrives_whole() {
@@ -134,9 +134,10 @@ fn text_over_the_paste_threshold_arrives_whole() {
         return;
     };
 
-    // Comfortably over the paste threshold, and still within what the
-    // harness's field accepts.
-    let text = "START-0123456789-END";
+    // Far enough over the threshold that a truncation would be unmistakable.
+    let text = "START-".to_string() + &"0123456789".repeat(60) + "-END";
+    let text = text.as_str();
+    assert_eq!(text.len(), 610);
     assert!(text.len() >= 20, "the text must take the clipboard path");
 
     type_into(&app, text, CaretPosition::Idle, true);

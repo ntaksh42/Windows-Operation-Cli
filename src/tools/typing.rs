@@ -189,10 +189,10 @@ fn wait_for_pasted_text(text: &str, before: Option<&str>) -> bool {
             None => return true,
             // Something arrived but not all of it yet. A paste is not atomic
             // from the reader's side — a long string is observable partway
-            // through — so treating "it changed" as "it finished" cut the
-            // text off wherever the first poll happened to land. Measured: a
-            // 608-character paste confirmed at 29 characters. Keep waiting,
-            // and remember that it started.
+            // through — so treating "it changed" as "it finished" would
+            // confirm at whatever the first poll happened to catch, and the
+            // caller would be told the whole text landed. Keep waiting, and
+            // remember that it started.
             Some(value) => {
                 if Some(value.as_str()) != before {
                     changed = true;
