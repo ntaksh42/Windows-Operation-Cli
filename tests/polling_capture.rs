@@ -54,18 +54,37 @@ fn the_polling_capture_sees_the_same_elements_and_titles() {
         names(&polled),
         "the polling capture found a different element set"
     );
+    // The test window holds the foreground across both captures, so this one
+    // title is stable enough to compare directly.
+    assert_eq!(
+        full.focused_window_title.as_deref(),
+        Some("Polling Parity"),
+        "the test window was not in the foreground"
+    );
     assert_eq!(
         full.focused_window_title, polled.focused_window_title,
         "the polling capture reported a different focused window"
     );
 
+    // Compare how many windows were reported rather than their exact titles.
+    // The two captures are taken moments apart, and a title can legitimately
+    // differ between them — a spinner ticking from "⠼ DevDeck" to "⠴ DevDeck"
+    // is a different string for the same window, and asserting on the set
+    // would make this test fail whenever such an app is open.
     let titles = |result: &windows_operation_cli::tools::snapshot::SnapshotResult| {
         result.window_titles.iter().cloned().collect::<HashSet<_>>()
     };
     assert_eq!(
+        titles(&full).len(),
+        titles(&polled).len(),
+        "the polling capture reported a different number of windows:\nfull: {:?}\npolled: {:?}",
         titles(&full),
-        titles(&polled),
-        "the polling capture reported a different window title set"
+        titles(&polled)
+    );
+    // The window under test is stable, so it must appear in both.
+    assert!(
+        titles(&full).contains("Polling Parity") && titles(&polled).contains("Polling Parity"),
+        "the test window is missing from one of the captures"
     );
 
     // The harness window is what the parity above is being asserted against;

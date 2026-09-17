@@ -55,6 +55,50 @@ unsafe extern "system" fn probe_proc(
     unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
 }
 
+/// Brings `hwnd` to the foreground, attaching to the current foreground
+/// window's input queue so the request is not refused.
+unsafe fn raise(hwnd: HWND) {
+    use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+
+    unsafe {
+        let foreground = GetForegroundWindow();
+        let current = GetCurrentThreadId();
+        let foreground_thread = if foreground.0.is_null() {
+            0
+        } else {
+            GetWindowThreadProcessId(foreground, None)
+        };
+        let target_thread = GetWindowThreadProcessId(hwnd, None);
+
+        let _ = AllowSetForegroundWindow(ASFW_ANY);
+        let mut attached = Vec::new();
+        for thread in [foreground_thread, target_thread] {
+            if thread != 0
+                && thread != current
+                && AttachThreadInput(current, thread, true).as_bool()
+            {
+                attached.push(thread);
+            }
+        }
+
+        let _ = SetForegroundWindow(hwnd);
+        let _ = BringWindowToTop(hwnd);
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_TOP),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+        );
+
+        for thread in attached.into_iter().rev() {
+            let _ = AttachThreadInput(current, thread, false);
+        }
+    }
+}
+
 /// A window that records the wheel events it is sent.
 struct Probe {
     hwnd: isize,
@@ -90,32 +134,36 @@ impl Probe {
             )
             .ok()?;
 
-            let _ = SetForegroundWindow(hwnd);
-            let _ = BringWindowToTop(hwnd);
-            let probe = Self {
-                hwnd: hwnd.0 as isize,
-                centre: (0, 0),
-            };
-            probe.pump(Duration::from_millis(500));
-
             let mut rect = RECT::default();
             let _ = GetWindowRect(hwnd, &mut rect);
             let centre = ((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2);
-
-            // If something else owns that pixel, a wheel event aimed there
-            // goes to that window instead and the test would measure nothing.
-            if WindowFromPoint(POINT {
-                x: centre.0,
-                y: centre.1,
-            }) != hwnd
-            {
-                let _ = DestroyWindow(hwnd);
-                return None;
-            }
-            Some(Self {
+            let probe = Self {
                 hwnd: hwnd.0 as isize,
                 centre,
-            })
+            };
+
+            // A bare `SetForegroundWindow` is refused while another process
+            // owns the foreground, which is the normal case when a previous
+            // test's window is still going away. Attach to that window's input
+            // queue, as `window::switch_to` does, and give it a few tries.
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                raise(hwnd);
+                probe.pump(Duration::from_millis(250));
+                if WindowFromPoint(POINT {
+                    x: centre.0,
+                    y: centre.1,
+                }) == hwnd
+                {
+                    return Some(probe);
+                }
+                if Instant::now() >= deadline {
+                    // Something else owns that pixel, so a wheel event aimed
+                    // there would go to that window and measure nothing. The
+                    // probe's own `Drop` tears the window down.
+                    return None;
+                }
+            }
         }
     }
 
