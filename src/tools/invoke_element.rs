@@ -4,6 +4,7 @@ use serde::Deserialize;
 use crate::params::{BoolOrString, ListOrString, opt_bool};
 use crate::state::{self, ElementNode, SupportedAction};
 use crate::tools::click::{self, ClickButton, ClickParams};
+use crate::tools::support;
 use crate::{uia, window};
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -18,6 +19,12 @@ fn choose_action(actions: &[SupportedAction]) -> Option<SupportedAction> {
     SupportedAction::highest_priority(actions)
 }
 
+/// Checks the saved center still sits inside the element's own saved bounds.
+///
+/// This is the part specific to the fallback: the element's geometry has to be
+/// self-consistent before its center is worth clicking. Whether the *window*
+/// can receive that click — minimized, moved, occluded — is
+/// [`support::validate_element_point`]'s job, which the caller runs next.
 fn validate_fallback(
     element: &ElementNode,
     owner_bounds: (i32, i32, i32, i32),
@@ -54,8 +61,11 @@ pub fn invoke_element(params: InvokeElementParams) -> Result<String, String> {
     let owner_bounds = window::get_window_rect(element.owner_handle)
         .ok_or_else(|| "Element owner window is closed".to_string())?;
     validate_fallback(&element, owner_bounds)?;
+    // Run the same window-state and occlusion checks a `label` click gets.
+    // Passing `loc` below bypasses them, so they have to happen here.
+    let (x, y) = support::validate_element_point(&element)?;
     click::click(ClickParams {
-        loc: Some(ListOrString::List(vec![element.center.0, element.center.1])),
+        loc: Some(ListOrString::List(vec![x, y])),
         label: None,
         button: Some(ClickButton::Left),
         clicks: Some(1),
