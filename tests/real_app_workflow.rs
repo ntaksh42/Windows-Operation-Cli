@@ -162,6 +162,57 @@ fn text_typed_into_notepad_registers_as_an_edit() {
     );
 }
 
+/// Long text has to arrive whole in an editor that has room for it.
+///
+/// The harness's single-line field cannot check this — measured, it stops a
+/// 608-character paste at 29 whether the paste comes from this tool or a
+/// hand-typed Ctrl+V, so the limit is the control's. Notepad holds all of it.
+#[test]
+#[ignore = "requires an interactive Windows desktop session and Notepad; run with --ignored"]
+fn long_text_arrives_whole_in_a_real_editor() {
+    let _desktop = desktop_lock();
+    let Some(notepad) = Notepad::open("long") else {
+        eprintln!("skipped: Notepad did not open the scratch file");
+        return;
+    };
+    let title = notepad.title();
+    let nodes = capture(&title);
+    let surface = nodes
+        .iter()
+        .find(|node| node.control_type == "document" || node.control_type == "edit")
+        .unwrap_or_else(|| panic!("no editing surface in the capture: {nodes:#?}"));
+
+    // Distinctive at both ends, so a truncation anywhere is visible.
+    let text = format!("START{}END", "0123456789".repeat(60));
+    assert_eq!(text.len(), 608);
+
+    type_text(TypeParams {
+        text: text.clone(),
+        loc: None,
+        label: Some(surface.element_id as i64),
+        clear: Some(BoolOrString::Bool(true)),
+        caret_position: None,
+        press_enter: None,
+    })
+    .expect("typing failed");
+
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        if let Some(value) = windows_operation_cli::uia::focused_element_value()
+            && value.contains(&text)
+        {
+            return;
+        }
+        if Instant::now() >= deadline {
+            let held = windows_operation_cli::uia::focused_element_value()
+                .map(|v| v.chars().count())
+                .unwrap_or(0);
+            panic!("the editor holds {held} characters, expected {}", text.chars().count());
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 /// `WaitFor` has to see a real application's state, not only the harness's.
 #[test]
 #[ignore = "requires an interactive Windows desktop session and Notepad; run with --ignored"]

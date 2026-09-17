@@ -179,18 +179,31 @@ fn paste_text(text: &str) -> Result<bool, String> {
 /// a full retype, which is worse than the silent failure this guards against.
 fn wait_for_pasted_text(text: &str, before: Option<&str>) -> bool {
     let deadline = std::time::Instant::now() + PASTE_CONFIRM_TIMEOUT;
+    let mut changed = false;
     loop {
         match crate::uia::focused_element_value() {
-            // The value moved on from what was there before the paste.
+            // The whole text is there: done.
             Some(value) if value.contains(text) => return true,
-            Some(value) if Some(value.as_str()) != before => return true,
             // Nothing readable to compare against; assume the paste worked
             // rather than risk typing the text a second time.
             None => return true,
-            Some(_) => {}
+            // Something arrived but not all of it yet. A paste is not atomic
+            // from the reader's side — a long string is observable partway
+            // through — so treating "it changed" as "it finished" cut the
+            // text off wherever the first poll happened to land. Measured: a
+            // 608-character paste confirmed at 29 characters. Keep waiting,
+            // and remember that it started.
+            Some(value) => {
+                if Some(value.as_str()) != before {
+                    changed = true;
+                }
+            }
         }
         if std::time::Instant::now() >= deadline {
-            return false;
+            // Out of time. Report success only if nothing arrived at all —
+            // then the caller can safely type it instead. A half-delivered
+            // paste must not be retyped on top of itself.
+            return changed;
         }
         std::thread::sleep(PASTE_CONFIRM_INTERVAL);
     }
