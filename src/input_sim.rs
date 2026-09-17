@@ -32,15 +32,42 @@ use windows::Win32::UI::WindowsAndMessaging::{
 const WHEEL_DELTA: i32 = 120;
 const DEFAULT_INPUT_SETTLE_MS: u64 = 50;
 const MAX_INPUT_SETTLE_MS: u64 = 5_000;
+const DEFAULT_CLICK_HOLD_MS: u64 = 15;
+const MAX_CLICK_HOLD_MS: u64 = 1_000;
+
+/// Reads a millisecond duration from `variable`, falling back to `default`.
+fn env_duration(variable: &str, default: u64, max: u64) -> Duration {
+    let millis = std::env::var(variable)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(default)
+        .clamp(0, max);
+    Duration::from_millis(millis)
+}
 
 /// Delay after a completed input action, configurable for slower applications.
 pub(crate) fn input_settle_delay() -> Duration {
-    let millis = std::env::var("WINDOWS_MCP_INPUT_SETTLE_MS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_INPUT_SETTLE_MS)
-        .clamp(0, MAX_INPUT_SETTLE_MS);
-    Duration::from_millis(millis)
+    env_duration(
+        "WINDOWS_MCP_INPUT_SETTLE_MS",
+        DEFAULT_INPUT_SETTLE_MS,
+        MAX_INPUT_SETTLE_MS,
+    )
+}
+
+/// How long a mouse button stays down within one click.
+///
+/// This used to be a hard-coded 50ms that no environment variable could
+/// reach, and every `Type` paid it too because typing clicks to take focus.
+/// Windows itself imposes no minimum between `WM_LBUTTONDOWN` and
+/// `WM_LBUTTONUP`; the hold exists only for controls that sample button state
+/// on a timer, so the default is now the smaller value that still clears a
+/// frame, with the old behaviour available through the environment.
+pub(crate) fn click_hold_delay() -> Duration {
+    env_duration(
+        "WINDOWS_MCP_CLICK_HOLD_MS",
+        DEFAULT_CLICK_HOLD_MS,
+        MAX_CLICK_HOLD_MS,
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,9 +133,105 @@ pub fn get_cursor_pos() -> (i32, i32) {
     (point.x, point.y)
 }
 
+/// How many times to retry a cursor move that the window manager refuses, and
+/// how long to wait between attempts.
+///
+/// `SetCursorPos` fails transiently while the input desktop is switching —
+/// a UAC prompt going up or down, the lock screen, a session transition, or
+/// simply a burst of window creation. Observed as `0x800700CB` under load.
+/// The desktop is back within a few tens of milliseconds, so a short retry
+/// turns a hard failure into a pause; a genuinely unavailable desktop still
+/// fails, just a moment later.
+const CURSOR_RETRY_ATTEMPTS: u32 = 5;
+const CURSOR_RETRY_DELAY: Duration = Duration::from_millis(40);
+
+/// Sends one input event, retrying on the same transient desktop
+/// unavailability that [`set_cursor_pos`] guards against. `what` names the
+/// event for the error message.
+fn send_one_input(input: INPUT, what: &str) -> Result<(), String> {
+    let mut last_error = None;
+    for attempt in 0..CURSOR_RETRY_ATTEMPTS {
+        if unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) } == 1 {
+            return Ok(());
+        }
+        last_error = Some(windows::core::Error::from_thread());
+        if attempt + 1 < CURSOR_RETRY_ATTEMPTS {
+            sleep(CURSOR_RETRY_DELAY);
+        }
+    }
+    Err(format!(
+        "SendInput {what} event was rejected after {CURSOR_RETRY_ATTEMPTS} attempts: {}",
+        last_error.expect("a failed attempt always records its error")
+    ))
+}
+
 /// Moves the cursor directly to `(x, y)` with no intermediate steps.
+///
+/// The failure is confirmed against the cursor's actual position rather than
+/// taken from the return value alone. `SetCursorPos` reports failure through
+/// the thread's last-error, which it does not clear on success, so a stale
+/// error from an unrelated earlier call surfaces here as a spurious `Err` —
+/// observed reporting "この操作を正しく終了しました。 (0x00000000)", success
+/// dressed as a failure. Asking where the cursor ended up settles it.
 pub fn set_cursor_pos(x: i32, y: i32) -> Result<(), String> {
-    unsafe { SetCursorPos(x, y).map_err(|error| format!("SetCursorPos failed: {error}")) }
+    let mut last_error = None;
+    for attempt in 0..CURSOR_RETRY_ATTEMPTS {
+        let call = unsafe { SetCursorPos(x, y) };
+        if call.is_ok() || get_cursor_pos() == (x, y) {
+            return Ok(());
+        }
+        last_error = call.err();
+        if attempt + 1 < CURSOR_RETRY_ATTEMPTS {
+            sleep(CURSOR_RETRY_DELAY);
+        }
+    }
+    let detail = match last_error {
+        Some(error) => error.to_string(),
+        None => format!("the cursor stayed at {:?}", get_cursor_pos()),
+    };
+    Err(format!(
+        "Could not move the cursor to ({x},{y}) after {CURSOR_RETRY_ATTEMPTS} attempts: {detail}. \
+         {}",
+        input_block_hint()
+    ))
+}
+
+/// Explains, as far as it can be determined here, why input injection is being
+/// refused.
+///
+/// The common cause is an elevated foreground window: Windows blocks input
+/// from a lower-integrity process to a higher-integrity one, and every
+/// `SetCursorPos` then fails with `ERROR_INVALID_HANDLE` while the cursor
+/// stays put. This layer deliberately keeps to `user32`, so it reports the
+/// foreground window's title and lets the reader draw the conclusion rather
+/// than reaching up into the window/privilege modules.
+fn input_block_hint() -> String {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowTextLengthW, GetWindowTextW,
+    };
+
+    let title = unsafe {
+        let hwnd = GetForegroundWindow();
+        let length = GetWindowTextLengthW(hwnd);
+        if hwnd.0.is_null() || length <= 0 {
+            String::new()
+        } else {
+            let mut buffer = vec![0u16; length as usize + 1];
+            let copied = GetWindowTextW(hwnd, &mut buffer).max(0) as usize;
+            String::from_utf16_lossy(&buffer[..copied])
+        }
+    };
+
+    if title.is_empty() {
+        return "The session may have no interactive desktop: a locked screen, or a service \
+                or disconnected remote session."
+            .to_string();
+    }
+    format!(
+        "The foreground window is {title:?}. If it runs elevated, Windows blocks input from \
+         this session to it — move it aside or restart the server elevated; otherwise the \
+         session may have no interactive desktop."
+    )
 }
 
 /// The system double-click time, in milliseconds.
@@ -158,14 +281,7 @@ fn send_mouse_input(
             },
         },
     };
-    let sent = unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) };
-    if sent != 1 {
-        return Err(format!(
-            "SendInput mouse event was rejected: {}",
-            windows::core::Error::from_thread()
-        ));
-    }
-    Ok(())
+    send_one_input(input, "mouse")
 }
 
 fn mouse_button_flags(button: MouseButton, down: bool) -> MOUSE_EVENT_FLAGS {
@@ -204,9 +320,14 @@ pub fn mouse_up(button: MouseButton) -> Result<(), String> {
 /// up, then `wait_after`.
 pub fn click_once(x: i32, y: i32, button: MouseButton, wait_after: Duration) -> Result<(), String> {
     set_cursor_pos(x, y)?;
-    mouse_down(button)?;
-    sleep(Duration::from_millis(50));
-    mouse_up(button)?;
+    let (nx, ny) = normalize_absolute(x, y);
+    // Send the press at the click's own coordinates rather than re-reading the
+    // cursor: `SetCursorPos` can be overridden between the two calls (pointer
+    // precision, another process moving the cursor), which used to send the
+    // button event wherever the cursor had drifted to.
+    send_mouse_input(absolute_button_flags(button, true), nx, ny, 0)?;
+    sleep(click_hold_delay());
+    send_mouse_input(absolute_button_flags(button, false), nx, ny, 0)?;
     sleep(wait_after);
     Ok(())
 }
@@ -314,14 +435,7 @@ fn send_keyboard_input(vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS) -> Result<(), 
             },
         },
     };
-    let sent = unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) };
-    if sent != 1 {
-        return Err(format!(
-            "SendInput keyboard event was rejected: {}",
-            windows::core::Error::from_thread()
-        ));
-    }
-    Ok(())
+    send_one_input(input, "keyboard")
 }
 
 /// Presses a virtual-key code down (does not release it).
@@ -397,14 +511,7 @@ fn send_unicode_unit(unit: u16, flags: KEYBD_EVENT_FLAGS) -> Result<(), String> 
             },
         },
     };
-    let sent = unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) };
-    if sent != 1 {
-        return Err(format!(
-            "SendInput keyboard event was rejected: {}",
-            windows::core::Error::from_thread()
-        ));
-    }
-    Ok(())
+    send_one_input(input, "keyboard")
 }
 
 /// Types `text` one character at a time, waiting `interval` between
@@ -538,6 +645,31 @@ mod tests {
 
         unsafe { std::env::remove_var("WINDOWS_MCP_INPUT_SETTLE_MS") };
     }
+    #[test]
+    fn click_hold_defaults_below_the_old_fixed_fifty_milliseconds() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var("WINDOWS_MCP_CLICK_HOLD_MS") };
+        assert_eq!(click_hold_delay(), Duration::from_millis(15));
+    }
+
+    #[test]
+    fn click_hold_honours_the_environment_override_and_clamps_it() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        // Applications that sample button state on a slow timer can restore
+        // the old behaviour.
+        unsafe { std::env::set_var("WINDOWS_MCP_CLICK_HOLD_MS", "50") };
+        assert_eq!(click_hold_delay(), Duration::from_millis(50));
+
+        unsafe { std::env::set_var("WINDOWS_MCP_CLICK_HOLD_MS", "9999") };
+        assert_eq!(click_hold_delay(), Duration::from_millis(1000));
+
+        unsafe { std::env::set_var("WINDOWS_MCP_CLICK_HOLD_MS", "nonsense") };
+        assert_eq!(click_hold_delay(), Duration::from_millis(15));
+
+        unsafe { std::env::remove_var("WINDOWS_MCP_CLICK_HOLD_MS") };
+    }
+
     #[test]
     fn absolute_clicks_target_the_virtual_desktop() {
         let flags = absolute_button_flags(MouseButton::Left, true);
