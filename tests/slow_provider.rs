@@ -17,7 +17,8 @@ use windows_operation_cli::tools::snapshot::{SnapshotParams, capture};
 use windows_operation_cli::window;
 
 /// `msinfo32` is the heaviest dialog that ships with Windows: a tree plus a
-/// long detail list, measured at roughly five seconds to walk.
+/// long detail list, measured at roughly five seconds to walk. PowerShell ISE
+/// (WPF) costs about the same, so this is not one application's quirk.
 struct SystemInfo {
     pid: u32,
     title: String,
