@@ -214,7 +214,7 @@ impl WindowsOperationCliServer {
 
     #[tool(
         name = "Shortcut",
-        description = "Executes keyboard shortcuts using key combinations separated by +. Examples: \"ctrl+c\" (copy), \"ctrl+v\" (paste), \"alt+tab\" (switch apps), \"win+r\" (Run dialog), \"win\" (Start menu), \"ctrl+shift+esc\" (Task Manager). Use for quick actions and system commands."
+        description = "Executes keyboard shortcuts using key combinations separated by +. Examples: \"ctrl+c\" (copy), \"ctrl+v\" (paste), \"alt+tab\" (switch apps), \"win+r\" (Run dialog), \"win\" (Start menu), \"ctrl+shift+esc\" (Task Manager). Since + separates keys, the plus and minus keys have names: \"ctrl+plus\" zooms in. Use for quick actions and system commands."
     )]
     async fn shortcut(
         &self,

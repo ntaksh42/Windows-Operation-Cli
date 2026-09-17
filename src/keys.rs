@@ -18,6 +18,11 @@ fn alias(name: &str) -> &str {
         "scrolllock" => "scroll",
         "windows" | "command" => "win",
         "option" => "alt",
+        // `+` is the separator between keys, so a shortcut that *contains*
+        // the plus key ("ctrl++" for zoom in) cannot be written literally.
+        // These names give it a spelling: `ctrl+plus`, `ctrl+minus`.
+        "plus" => "add",
+        "minus" => "subtract",
         other => other,
     }
 }
@@ -171,5 +176,29 @@ mod tests {
     #[test]
     fn rejects_unknown_key() {
         assert!(resolve_key("notakey").is_err());
+    }
+
+    #[test]
+    fn the_plus_key_has_a_name_because_the_separator_takes_the_symbol() {
+        // "ctrl++" cannot be written: the second `+` is read as a separator
+        // and leaves an empty token. `plus` and `minus` are the way to say it.
+        assert_eq!(resolve_key("plus").unwrap(), 0x6B);
+        assert_eq!(resolve_key("minus").unwrap(), 0x6D);
+        assert_eq!(resolve_key("add").unwrap(), 0x6B);
+
+        let chord: Result<Vec<u16>, String> = "ctrl+plus".split('+').map(resolve_key).collect();
+        assert_eq!(chord.unwrap(), vec![0x11, 0x6B]);
+    }
+
+    #[test]
+    fn a_missing_key_between_separators_is_rejected() {
+        for shortcut in ["ctrl+", "+c", "ctrl++", ""] {
+            let parsed: Result<Vec<u16>, String> =
+                shortcut.split('+').map(resolve_key).collect();
+            assert!(
+                parsed.is_err(),
+                "{shortcut:?} should be rejected, got {parsed:?}"
+            );
+        }
     }
 }
