@@ -28,11 +28,15 @@ static MESSAGE_COUNT: AtomicU32 = AtomicU32::new(0);
 /// Set when a horizontal wheel message arrives, which is what a `shift`-held
 /// scroll produces.
 static HORIZONTAL_DELTA: AtomicI32 = AtomicI32::new(0);
+/// Low word of the most recent wheel message's `wParam`: the modifier keys
+/// Windows saw held while the wheel turned.
+static LAST_KEYS: AtomicI32 = AtomicI32::new(0);
 
 fn reset_counters() {
     TOTAL_DELTA.store(0, Ordering::SeqCst);
     MESSAGE_COUNT.store(0, Ordering::SeqCst);
     HORIZONTAL_DELTA.store(0, Ordering::SeqCst);
+    LAST_KEYS.store(0, Ordering::SeqCst);
 }
 
 unsafe extern "system" fn probe_proc(
@@ -46,6 +50,7 @@ unsafe extern "system" fn probe_proc(
         WM_MOUSEWHEEL => {
             TOTAL_DELTA.fetch_add(delta, Ordering::SeqCst);
             MESSAGE_COUNT.fetch_add(1, Ordering::SeqCst);
+            LAST_KEYS.store((wparam.0 & 0xFFFF) as i32, Ordering::SeqCst);
         }
         WM_MOUSEHWHEEL => {
             HORIZONTAL_DELTA.fetch_add(delta, Ordering::SeqCst);
@@ -337,6 +342,101 @@ fn zero_notches_sends_nothing() {
     probe.pump(Duration::from_millis(500));
 
     assert_eq!(MESSAGE_COUNT.load(Ordering::SeqCst), 0);
+}
+
+/// A modifier has to be held while the wheel turns — `ctrl+wheel` is how
+/// applications are asked to zoom, and the wheel alone means something else
+/// entirely.
+#[test]
+#[ignore = "requires an interactive Windows desktop session; run with --ignored"]
+fn a_modifier_is_held_while_the_wheel_turns() {
+    let Some(probe) = Probe::open() else {
+        eprintln!("skipped: the probe window could not take the foreground");
+        return;
+    };
+    reset_counters();
+
+    scroll(ScrollParams {
+        loc: Some(ListOrString::List(vec![probe.centre.0, probe.centre.1])),
+        label: None,
+        scroll_type: Some(ScrollType::Vertical),
+        direction: Some(ScrollDirection::Up),
+        wheel_times: Some(1),
+        modifier: Some("ctrl".to_string()),
+    })
+    .expect("scroll failed");
+    probe.pump(Duration::from_millis(900));
+
+    // MK_CONTROL is bit 3.
+    assert!(
+        LAST_KEYS.load(Ordering::SeqCst) & 0x0008 != 0,
+        "the window did not see Ctrl held while scrolling (keys={:#06x})",
+        LAST_KEYS.load(Ordering::SeqCst)
+    );
+    assert_eq!(
+        TOTAL_DELTA.load(Ordering::SeqCst),
+        120,
+        "the modifier changed the delta"
+    );
+}
+
+/// The modifier must not still be held on the next scroll.
+#[test]
+#[ignore = "requires an interactive Windows desktop session; run with --ignored"]
+fn a_modifier_is_released_after_scrolling() {
+    let Some(probe) = Probe::open() else {
+        eprintln!("skipped: the probe window could not take the foreground");
+        return;
+    };
+
+    scroll(ScrollParams {
+        loc: Some(ListOrString::List(vec![probe.centre.0, probe.centre.1])),
+        label: None,
+        scroll_type: Some(ScrollType::Vertical),
+        direction: Some(ScrollDirection::Down),
+        wheel_times: Some(1),
+        modifier: Some("ctrl".to_string()),
+    })
+    .expect("scroll failed");
+    probe.pump(Duration::from_millis(600));
+
+    reset_counters();
+    vertical(&probe, ScrollDirection::Down, 1);
+    probe.pump(Duration::from_millis(900));
+    assert_eq!(
+        LAST_KEYS.load(Ordering::SeqCst) & 0x0008,
+        0,
+        "Ctrl was still held on the next scroll"
+    );
+}
+
+/// An unknown modifier is rejected before any wheel event is sent.
+#[test]
+#[ignore = "requires an interactive Windows desktop session; run with --ignored"]
+fn an_unknown_scroll_modifier_is_rejected() {
+    let Some(probe) = Probe::open() else {
+        eprintln!("skipped: the probe window could not take the foreground");
+        return;
+    };
+    reset_counters();
+
+    let error = scroll(ScrollParams {
+        loc: Some(ListOrString::List(vec![probe.centre.0, probe.centre.1])),
+        label: None,
+        scroll_type: Some(ScrollType::Vertical),
+        direction: Some(ScrollDirection::Down),
+        wheel_times: Some(1),
+        modifier: Some("hyper".to_string()),
+    })
+    .expect_err("an unknown modifier should be rejected");
+    assert!(error.contains("modifier must be"), "unexpected: {error}");
+
+    probe.pump(Duration::from_millis(300));
+    assert_eq!(
+        MESSAGE_COUNT.load(Ordering::SeqCst),
+        0,
+        "a rejected scroll still sent a wheel event"
+    );
 }
 
 /// Out-of-range notch counts are rejected before any input is sent.
