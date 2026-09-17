@@ -57,7 +57,6 @@ fn urlencode(text: &str) -> String {
 
 /// An Edge window showing the probe page, closed when the test ends.
 struct Browser {
-    pid: u32,
     handle: isize,
     profile: std::path::PathBuf,
 }
@@ -124,7 +123,6 @@ impl Browser {
                     }
                 }
                 return Some(Self {
-                    pid: found.pid,
                     handle: found.handle,
                     profile,
                 });
@@ -142,9 +140,26 @@ impl Browser {
 
 impl Drop for Browser {
     fn drop(&mut self) {
-        let _ = Command::new("taskkill")
-            .args(["/PID", &self.pid.to_string(), "/F", "/T"])
+        // Chromium spreads itself over a browser process, a GPU process, and
+        // one renderer per tab, and the window's own process is rarely the
+        // root of that tree — so `taskkill /T` on it leaves the siblings
+        // running. Select by the profile directory instead, which is unique
+        // to this browser and appears in every one of its command lines.
+        let profile = self.profile.display().to_string();
+        let _ = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &format!(
+                    "Get-CimInstance Win32_Process -Filter \"Name='msedge.exe'\" | \
+                     Where-Object {{ $_.CommandLine -like '*{profile}*' }} | \
+                     ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force \
+                     -ErrorAction SilentlyContinue }}"
+                ),
+            ])
             .output();
+
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
             if !window::list_current_windows()
@@ -155,9 +170,14 @@ impl Drop for Browser {
             }
             std::thread::sleep(Duration::from_millis(100));
         }
-        // The throwaway profile is several megabytes; leaving one behind per
-        // test run would accumulate in the temp directory.
-        let _ = std::fs::remove_dir_all(&self.profile);
+        // The throwaway profile is several megabytes, and the processes above
+        // have to be gone before it can be removed.
+        for _ in 0..10 {
+            if std::fs::remove_dir_all(&self.profile).is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
     }
 }
 
