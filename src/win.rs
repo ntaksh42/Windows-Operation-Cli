@@ -12,6 +12,95 @@ pub fn is_elevated() -> bool {
     unsafe { IsUserAnAdmin().as_bool() }
 }
 
+/// Whether `pid` runs at a higher integrity level than this process.
+///
+/// Windows' UI privilege isolation lets a process read the UI of another only
+/// at its own integrity level or below. A higher-integrity (elevated) window
+/// therefore answers UI Automation with its frame and nothing inside — which
+/// is indistinguishable from an empty window unless the integrity levels are
+/// compared. Saying which it was is the difference between a caller retrying
+/// forever and one that knows to restart the server elevated.
+///
+/// `OpenProcess` is not the test: `PROCESS_QUERY_LIMITED_INFORMATION` is
+/// granted across that boundary on purpose, so it succeeds for an elevated
+/// target and reveals nothing.
+pub fn runs_at_higher_integrity(pid: u32) -> bool {
+    integrity_level(pid).is_some_and(|other| {
+        integrity_level(std::process::id()).is_some_and(|own| other > own)
+    })
+}
+
+/// Reads a process's integrity level (the RID of its token's integrity SID).
+fn integrity_level(pid: u32) -> Option<u32> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::Security::{
+        GetTokenInformation, TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TokenIntegrityLevel,
+    };
+    use windows::Win32::System::Threading::{
+        OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let result = (|| {
+            let mut token = Default::default();
+            OpenProcessToken(process, TOKEN_QUERY, &mut token).ok()?;
+            let token_guard = scopeguard(token);
+
+            let mut needed = 0u32;
+            // First call sizes the buffer; it is expected to fail.
+            let _ = GetTokenInformation(*token_guard, TokenIntegrityLevel, None, 0, &mut needed);
+            if needed == 0 {
+                return None;
+            }
+            let mut buffer = vec![0u8; needed as usize];
+            GetTokenInformation(
+                *token_guard,
+                TokenIntegrityLevel,
+                Some(buffer.as_mut_ptr().cast()),
+                needed,
+                &mut needed,
+            )
+            .ok()?;
+
+            let label = &*(buffer.as_ptr() as *const TOKEN_MANDATORY_LABEL);
+            let sid = label.Label.Sid;
+            let count = *windows::Win32::Security::GetSidSubAuthorityCount(sid);
+            if count == 0 {
+                return None;
+            }
+            Some(*windows::Win32::Security::GetSidSubAuthority(
+                sid,
+                (count - 1) as u32,
+            ))
+        })();
+        let _ = CloseHandle(process);
+        result
+    }
+}
+
+/// Closes a token handle when dropped.
+fn scopeguard(handle: windows::Win32::Foundation::HANDLE) -> TokenHandle {
+    TokenHandle(handle)
+}
+
+struct TokenHandle(windows::Win32::Foundation::HANDLE);
+
+impl std::ops::Deref for TokenHandle {
+    type Target = windows::Win32::Foundation::HANDLE;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for TokenHandle {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+
 /// Expands `%VAR%` references in `value` using the current process environment,
 /// mirroring `winreg.ExpandEnvironmentStrings` used by the Python reference.
 pub fn expand_env_string(value: &str) -> String {
