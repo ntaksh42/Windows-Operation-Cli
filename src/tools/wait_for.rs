@@ -293,7 +293,7 @@ pub fn wait_for(params: WaitForParams) -> Result<String, String> {
             ));
         };
         snapshot_params.timeout_ms = Some(snapshot_timeout_ms);
-        if let Ok(result) = snapshot::capture(&snapshot_params) {
+        if let Ok(result) = snapshot::capture_for_polling(&snapshot_params) {
             let matched = evaluate_condition(condition, &params, &result);
             if let Some(detail) = matched {
                 let elapsed = started.elapsed().as_secs_f64();

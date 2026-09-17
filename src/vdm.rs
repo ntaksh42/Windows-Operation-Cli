@@ -1,5 +1,8 @@
 //! Windows virtual-desktop discovery and current-desktop filtering.
 
+use std::cell::RefCell;
+use std::mem::ManuallyDrop;
+
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
 use windows::Win32::UI::Shell::{IVirtualDesktopManager, VirtualDesktopManager};
@@ -90,30 +93,59 @@ fn default_desktop() -> Vec<VirtualDesktop> {
     }]
 }
 
+thread_local! {
+    /// The desktop manager, created once per thread.
+    ///
+    /// `is_window_on_current_desktop` is called from inside the `EnumWindows`
+    /// callback, so creating the COM object per call put a `CoCreateInstance`
+    /// on every window of every enumeration — measured at 26ms per Snapshot
+    /// against a 0.45ms raw walk, and paid again on every `WaitFor` poll.
+    /// One object per thread serves every enumeration instead.
+    ///
+    /// `ManuallyDrop` keeps the interface alive for the life of the thread on
+    /// purpose. A `thread_local` destructor runs during thread teardown, at
+    /// which point the thread's COM apartment may already be gone; releasing
+    /// the proxy there faulted (`STATUS_ACCESS_VIOLATION`). Leaking one
+    /// interface pointer per thread is the documented trade for caching a COM
+    /// object in thread-local storage.
+    static DESKTOP_MANAGER: RefCell<Option<ManuallyDrop<IVirtualDesktopManager>>> =
+        const { RefCell::new(None) };
+}
+
+/// Runs `f` with the cached desktop manager, creating it on first use.
+/// Returns `None` when COM or the manager itself is unavailable.
+fn with_desktop_manager<T>(f: impl FnOnce(&IVirtualDesktopManager) -> T) -> Option<T> {
+    if crate::uia::ensure_com_initialized().is_err() {
+        return None;
+    }
+    DESKTOP_MANAGER.with(|cell| {
+        let mut cached = cell.borrow_mut();
+        if cached.is_none() {
+            *cached = unsafe {
+                CoCreateInstance(&VirtualDesktopManager, None, CLSCTX_INPROC_SERVER).ok()
+            }
+            .map(ManuallyDrop::new);
+        }
+        cached.as_deref().map(f)
+    })
+}
+
 /// Returns whether a top-level window belongs to the current virtual desktop.
 /// If the COM service is unavailable, keeps the window rather than hiding it.
 pub fn is_window_on_current_desktop(handle: isize) -> bool {
-    if crate::uia::ensure_com_initialized().is_err() {
-        return true;
-    }
-    unsafe {
-        let manager: Result<IVirtualDesktopManager, _> =
-            CoCreateInstance(&VirtualDesktopManager, None, CLSCTX_INPROC_SERVER);
+    with_desktop_manager(|manager| unsafe {
         manager
-            .and_then(|manager| manager.IsWindowOnCurrentVirtualDesktop(HWND(handle as *mut _)))
+            .IsWindowOnCurrentVirtualDesktop(HWND(handle as *mut _))
             .map(|current| current.as_bool())
             .unwrap_or(true)
-    }
+    })
+    .unwrap_or(true)
 }
 
 pub fn api_available() -> Result<(), String> {
     crate::uia::ensure_com_initialized()?;
-    unsafe {
-        let _: IVirtualDesktopManager =
-            CoCreateInstance(&VirtualDesktopManager, None, CLSCTX_INPROC_SERVER)
-                .map_err(|error| error.to_string())?;
-    }
-    Ok(())
+    with_desktop_manager(|_| ())
+        .ok_or_else(|| "VirtualDesktopManager is unavailable".to_string())
 }
 
 #[cfg(test)]

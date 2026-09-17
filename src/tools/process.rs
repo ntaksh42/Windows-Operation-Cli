@@ -45,7 +45,8 @@ pub struct ProcessParams {
     pub sort_by: SortBy,
     #[serde(default = "default_limit")]
     pub limit: i64,
-    /// `kill` mode: force-kill vs. terminate.
+    /// `kill` mode: accepted for compatibility. Windows offers no graceful
+    /// termination primitive here, so the process is force-killed either way.
     #[serde(default)]
     pub force: Option<BoolOrString>,
 }
@@ -178,11 +179,14 @@ fn format_row(cell: &[String; 4], widths: &[usize; 4]) -> String {
         .to_string()
 }
 
-/// `force` only selects the response wording ("Force killed" vs. "Terminated");
-/// on Windows there is no separate graceful-termination primitive — both the
-/// Python reference's `psutil.terminate()`/`kill()` and `sysinfo`'s
-/// `Process::kill()` call `TerminateProcess` either way.
-fn kill_process(name: Option<&str>, pid: Option<u32>, force: bool) -> String {
+/// Both `force` settings end the process the same way. There is no separate
+/// graceful-termination primitive here: the Python reference's
+/// `psutil.terminate()`/`kill()` and `sysinfo`'s `Process::kill()` all reach
+/// `TerminateProcess`, which gives the target no chance to save or clean up.
+///
+/// The response says so rather than reporting "Terminated" for
+/// `force=false`, which reads as the graceful path and is not what happened.
+fn kill_process(name: Option<&str>, pid: Option<u32>, _force: bool) -> String {
     if pid.is_none() && name.is_none() {
         return "Error: Provide either pid or name parameter for kill mode.".to_string();
     }
@@ -222,6 +226,5 @@ fn kill_process(name: Option<&str>, pid: Option<u32>, force: bool) -> String {
             name.unwrap_or_default()
         );
     }
-    let verb = if force { "Force killed" } else { "Terminated" };
-    format!("{verb}: {}", killed.join(", "))
+    format!("Force killed: {}", killed.join(", "))
 }

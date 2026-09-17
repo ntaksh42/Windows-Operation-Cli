@@ -18,6 +18,14 @@ pub struct MultiEditParams {
     pub labels: Option<ListOrString<(i64, String)>>,
 }
 
+/// How long to let the keyboard queue drain before moving to the next field.
+///
+/// Scaled off the configured input settle delay so a machine that needs the
+/// slower setting gets a proportionally longer gap here too.
+fn field_settle_delay() -> std::time::Duration {
+    crate::input_sim::input_settle_delay() * 3
+}
+
 /// Types each `(x, y, text)` entry (with `clear=true`) and returns the
 /// confirmation message.
 pub fn multi_edit(params: MultiEditParams) -> Result<String, String> {
@@ -41,7 +49,17 @@ pub fn multi_edit(params: MultiEditParams) -> Result<String, String> {
         return Err("At least one loc or label entry must be provided.".to_string());
     }
 
-    for &(x, y, ref text) in &entries {
+    for (index, &(x, y, ref text)) in entries.iter().enumerate() {
+        if index > 0 {
+            // `SendInput` queues keystrokes; it does not wait for the target
+            // to consume them. Moving to the next field immediately clicked
+            // away while the previous field's characters were still arriving,
+            // and they landed in whichever field had focus by then — observed
+            // as "first field" and "replacement" coming out interleaved as
+            // "fitrsat field" and "rcephlaoceument". Let the queue drain
+            // before taking focus somewhere else.
+            std::thread::sleep(field_settle_delay());
+        }
         typing::type_at(x, y, text, CaretPosition::Idle, true, false)?;
     }
 

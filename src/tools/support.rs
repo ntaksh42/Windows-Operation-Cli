@@ -10,7 +10,24 @@ fn point_inside_rect(x: i32, y: i32, bounds: (i32, i32, i32, i32)) -> bool {
     x >= left && x < left + width && y >= top && y < top + height
 }
 
-fn validate_label_point(node: state::ElementNode) -> Result<(i32, i32), String> {
+/// Rejects a click target whose window cannot actually receive it: minimized,
+/// closed, moved out from under the saved center, or covered by another
+/// window.
+///
+/// Every route that turns a Snapshot element into a click goes through this,
+/// including `InvokeElement`'s coordinate fallback — that path used to build
+/// its own `loc` click and so skipped the occlusion check entirely.
+pub fn validate_element_point(node: &state::ElementNode) -> Result<(i32, i32), String> {
+    // A minimized window keeps reporting a rectangle — one parked off-screen
+    // near (-32000, -32000) — and the element's saved center is parked with
+    // it, so the bounds check below passes and the click goes nowhere. Ask
+    // about the window state directly instead of inferring it from geometry.
+    if window::is_minimized(node.owner_handle) {
+        return Err(format!(
+            "Element \"{}\" belongs to a minimized window. Restore it (App switch) or call Snapshot again.",
+            node.name
+        ));
+    }
     let (owner_x, owner_y, owner_width, owner_height) = window::get_window_rect(node.owner_handle)
         .ok_or_else(|| "Label owner window is closed. Please call Snapshot again.".to_string())?;
     let (x, y) = node.center;
@@ -20,6 +37,16 @@ fn validate_label_point(node: state::ElementNode) -> Result<(i32, i32), String> 
     if window::is_point_occluded(x, y, node.owner_handle) {
         return Err(format!(
             "Element \"{}\" is covered by another window at ({x},{y}). Bring its window to the front (App switch) or call Snapshot again.",
+            node.name
+        ));
+    }
+    // The checks above only prove the *window* is where it was. Within it, a
+    // scrolled list or a relaid-out pane moves controls under coordinates that
+    // still look valid, and the click then lands on whatever took the spot.
+    // Ask the provider what is actually at the point.
+    if crate::uia::identify_point(node, x, y) == crate::uia::PointIdentity::Differs {
+        return Err(format!(
+            "Element \"{}\" is no longer at ({x},{y}); the view moved since the last Snapshot. Call Snapshot again.",
             node.name
         ));
     }
@@ -51,14 +78,14 @@ fn resolve_label_value(label: i64) -> Result<state::ElementNode, String> {
 /// Python's list-negative-indexing; a label is never meant to be negative,
 /// so this reports it as out of range instead).
 pub fn resolve_label_checked(label: i64) -> Result<(i32, i32), String> {
-    validate_label_point(resolve_label_value(label)?)
+    validate_element_point(&resolve_label_value(label)?)
 }
 
 /// Resolves multiple labels to coordinates in bulk.
 pub fn resolve_labels_checked(labels: &[i64]) -> Result<Vec<(i32, i32)>, String> {
     labels
         .iter()
-        .map(|&label| resolve_label_value(label).and_then(validate_label_point))
+        .map(|&label| resolve_label_value(label).and_then(|node| validate_element_point(&node)))
         .collect()
 }
 

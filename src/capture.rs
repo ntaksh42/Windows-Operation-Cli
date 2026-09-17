@@ -3,6 +3,7 @@
 use std::cell::RefCell;
 use std::env;
 use std::ffi::c_void;
+use std::mem::ManuallyDrop;
 
 use windows::Win32::Foundation::{HMODULE, RECT};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
@@ -28,13 +29,36 @@ use windows::core::Interface;
 
 const DXGI_ACQUIRE_TIMEOUT_MS: u32 = 100;
 
+/// How long to keep asking Desktop Duplication for a frame that actually
+/// carries the desktop, before giving up and letting the caller fall back.
+/// A new duplication always yields one contentless frame first, and an idle
+/// desktop may present nothing for a while after that.
+const DXGI_FRAME_DEADLINE: std::time::Duration = std::time::Duration::from_millis(350);
+
 type AdapterKey = (u32, i32);
+
+/// A cached D3D device and its immediate context.
+///
+/// `ManuallyDrop` is the point: these live in thread-local storage, whose
+/// destructor runs while the thread is being torn down. Releasing a D3D
+/// device there crashed the process — the graphics runtime is already
+/// unwinding by then, and the reference drop faulted inside it. Screenshot
+/// requests run on Tokio's blocking pool, whose threads are retired routinely,
+/// so every retirement took the server down with it.
+///
+/// Leaking one device per thread is the documented trade for caching a COM
+/// object in TLS; the pool is small and bounded, and the OS reclaims
+/// everything at process exit.
+struct CachedDevice {
+    device: ManuallyDrop<ID3D11Device>,
+    context: ManuallyDrop<ID3D11DeviceContext>,
+}
 
 thread_local! {
     // Screenshot requests run on Tokio's blocking threads. Reusing the D3D
     // device per such thread avoids recreating an expensive device for every
     // output on every request, while keeping COM objects thread-affine.
-    static DXGI_DEVICES: RefCell<Vec<(AdapterKey, ID3D11Device, ID3D11DeviceContext)>> = const {
+    static DXGI_DEVICES: RefCell<Vec<(AdapterKey, CachedDevice)>> = const {
         RefCell::new(Vec::new())
     };
 }
@@ -102,13 +126,38 @@ pub fn capture_rect_with_backend(
     }
 
     match backend {
+        // Desktop Duplication can succeed and still hand back an empty
+        // surface: a protected-content window on screen, a session that
+        // disallows duplication, a stale frame after a mode change. The call
+        // reports no error, so only the pixels give it away. Fall back to GDI
+        // for a blank frame as well as for an outright failure — `auto` exists
+        // to return a usable screenshot, not to insist on one backend.
         Backend::Auto => match unsafe { capture_rect_dxgi(rect) } {
-            Ok(image) => Ok((image, Backend::Dxgi)),
-            Err(_) => capture_gdi_image(rect, width, height).map(|image| (image, Backend::Gdi)),
+            Ok(image) if !is_blank(&image) => Ok((image, Backend::Dxgi)),
+            _ => capture_gdi_image(rect, width, height).map(|image| (image, Backend::Gdi)),
         },
         Backend::Gdi => capture_gdi_image(rect, width, height).map(|image| (image, Backend::Gdi)),
         Backend::Dxgi => unsafe { capture_rect_dxgi(rect) }.map(|image| (image, Backend::Dxgi)),
     }
+}
+
+/// Whether a capture came back with essentially nothing in it.
+///
+/// A real desktop always lights up most of its pixels — even a dark theme
+/// sits well above zero. Sampling every 64th pixel keeps this at a fraction
+/// of a millisecond on a 4K frame while still being decisive.
+fn is_blank(image: &image::RgbaImage) -> bool {
+    const STRIDE: usize = 64;
+    let raw = image.as_raw();
+    let mut sampled = 0u32;
+    let mut lit = 0u32;
+    for pixel in raw.chunks_exact(4).step_by(STRIDE) {
+        sampled += 1;
+        if pixel[0] as u32 + pixel[1] as u32 + pixel[2] as u32 > 0 {
+            lit += 1;
+        }
+    }
+    sampled > 0 && lit * 2 < sampled
 }
 
 fn capture_gdi_image(rect: RECT, width: i32, height: i32) -> Result<image::RgbaImage, String> {
@@ -149,13 +198,17 @@ fn device_for_adapter(
     let key = (desc.AdapterLuid.LowPart, desc.AdapterLuid.HighPart);
     DXGI_DEVICES.with(|devices| {
         let mut devices = devices.borrow_mut();
-        if let Some((_, device, context)) =
-            devices.iter().find(|(stored_key, _, _)| *stored_key == key)
-        {
-            return Ok((device.clone(), context.clone()));
+        if let Some((_, cached)) = devices.iter().find(|(stored_key, _)| *stored_key == key) {
+            return Ok(((*cached.device).clone(), (*cached.context).clone()));
         }
         let (device, context) = unsafe { create_device(adapter) }?;
-        devices.push((key, device.clone(), context.clone()));
+        devices.push((
+            key,
+            CachedDevice {
+                device: ManuallyDrop::new(device.clone()),
+                context: ManuallyDrop::new(context.clone()),
+            },
+        ));
         Ok((device, context))
     })
 }
@@ -172,11 +225,38 @@ unsafe fn capture_output(
         let duplication = output
             .DuplicateOutput(&device)
             .map_err(|e| format!("DuplicateOutput failed: {e}"))?;
-        let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
-        let mut resource = None;
-        duplication
-            .AcquireNextFrame(DXGI_ACQUIRE_TIMEOUT_MS, &mut frame_info, &mut resource)
-            .map_err(|e| format!("AcquireNextFrame failed: {e}"))?;
+
+        // A freshly created duplication hands back a frame with no desktop
+        // image in it: `AcquireNextFrame` succeeds, `LastPresentTime` is zero,
+        // and the texture holds whatever the accumulator started as — black.
+        // Only a frame the compositor has actually presented carries pixels.
+        //
+        // Nothing forces the desktop to present, either, so a still screen can
+        // legitimately have nothing new for a while. Release each contentless
+        // frame and ask again until one arrives or the budget runs out. This
+        // is why full-screen captures looked fine while a capture taken right
+        // after another one came back blank: the second duplication was new.
+        let deadline = std::time::Instant::now() + DXGI_FRAME_DEADLINE;
+        let resource = loop {
+            let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
+            let mut next = None;
+            duplication
+                .AcquireNextFrame(DXGI_ACQUIRE_TIMEOUT_MS, &mut frame_info, &mut next)
+                .map_err(|e| format!("AcquireNextFrame failed: {e}"))?;
+            if frame_info.LastPresentTime != 0 {
+                break next;
+            }
+            // This frame carries only cursor or metadata changes. Give it back
+            // before asking for the next one — holding it blocks the queue.
+            drop(next);
+            let _ = duplication.ReleaseFrame();
+            if std::time::Instant::now() >= deadline {
+                return Err(
+                    "DXGI produced no presented frame before the deadline; the desktop may be idle"
+                        .to_string(),
+                );
+            }
+        };
 
         let result = (|| {
             let texture: ID3D11Texture2D = resource
@@ -325,45 +405,30 @@ fn copy_rgba_region(
     }
 }
 
-/// Verifies that Desktop Duplication can be initialized for at least one
-/// attached output without acquiring a frame.
+/// Verifies Desktop Duplication by actually capturing a frame.
+///
+/// An earlier version stopped at `DuplicateOutput` succeeding, which reports
+/// only that duplication can be *set up*. That is not what callers of a
+/// diagnostic want to know: a session where duplication initializes but every
+/// frame comes back empty passed the check while `use_vision` returned a black
+/// image. Take a real frame and look at it.
 pub fn dxgi_available() -> Result<(), String> {
-    unsafe {
-        let factory: IDXGIFactory1 =
-            CreateDXGIFactory1().map_err(|e| format!("CreateDXGIFactory1 failed: {e}"))?;
-        let mut last_error = None;
-        for adapter_index in 0.. {
-            let Ok(adapter) = factory.EnumAdapters1(adapter_index) else {
-                break;
-            };
-            for output_index in 0.. {
-                let Ok(output) = adapter.EnumOutputs(output_index) else {
-                    break;
-                };
-                let output: IDXGIOutput1 = match output.cast() {
-                    Ok(output) => output,
-                    Err(error) => {
-                        last_error = Some(error.to_string());
-                        continue;
-                    }
-                };
-                if !output
-                    .GetDesc()
-                    .map_err(|e| format!("GetDesc failed: {e}"))?
-                    .AttachedToDesktop
-                    .as_bool()
-                {
-                    continue;
-                }
-                let (device, _) = create_device(&adapter)?;
-                match output.DuplicateOutput(&device) {
-                    Ok(_) => return Ok(()),
-                    Err(error) => last_error = Some(format!("DuplicateOutput failed: {error}")),
-                }
-            }
+    let (image, _) = capture_rect_with_backend(virtual_screen_rect(), Backend::Dxgi)?;
+    let mut lit = 0u64;
+    for pixel in image.pixels() {
+        if pixel.0[0] as u32 + pixel.0[1] as u32 + pixel.0[2] as u32 > 0 {
+            lit += 1;
         }
-        Err(last_error.unwrap_or_else(|| "DXGI found no attached output".to_string()))
     }
+    let total = (image.width() as u64 * image.height() as u64).max(1);
+    if lit * 2 < total {
+        return Err(format!(
+            "DXGI captured a mostly blank frame ({}% of pixels lit); \
+             the desktop may be locked or the session may not allow duplication",
+            lit * 100 / total
+        ));
+    }
+    Ok(())
 }
 
 /// Captures `rect` via GDI `BitBlt` + `GetDIBits`, returning RGBA bytes.
@@ -469,12 +534,54 @@ mod tests {
     }
 
     #[test]
+    fn a_black_frame_is_recognized_as_blank() {
+        // What a failed Desktop Duplication hands back: right size, no pixels.
+        let black = image::RgbaImage::from_pixel(256, 256, image::Rgba([0, 0, 0, 255]));
+        assert!(is_blank(&black));
+    }
+
+    #[test]
+    fn a_dark_desktop_is_not_blank() {
+        // A dark theme is dim, not empty; it must not trigger the fallback.
+        let dark = image::RgbaImage::from_pixel(256, 256, image::Rgba([13, 17, 23, 255]));
+        assert!(!is_blank(&dark));
+    }
+
+    #[test]
+    fn a_mostly_black_frame_with_some_content_is_not_blank() {
+        // A window on an unlit desktop still counts as a real capture once
+        // more than half the sampled pixels carry colour.
+        let mut image = image::RgbaImage::from_pixel(256, 256, image::Rgba([0, 0, 0, 255]));
+        for (_, _, pixel) in image.enumerate_pixels_mut().filter(|(_, y, _)| *y > 100) {
+            *pixel = image::Rgba([40, 40, 40, 255]);
+        }
+        assert!(!is_blank(&image));
+    }
+
+    #[test]
     fn rgba_region_copy_clips_to_both_images() {
         let source = image::RgbaImage::from_pixel(2, 2, image::Rgba([1, 2, 3, 4]));
         let mut destination = image::RgbaImage::new(2, 2);
         copy_rgba_region(&source, &mut destination, (0, 0), (1, 1), (2, 2));
         assert_eq!(destination.get_pixel(1, 1), &image::Rgba([1, 2, 3, 4]));
         assert_eq!(destination.get_pixel(0, 1), &image::Rgba([0, 0, 0, 0]));
+    }
+
+    /// Share of pixels with any colour in them, and the mean channel sum.
+    /// A capture that silently produced an empty frame scores zero on both
+    /// while still being the right size, which a dimension check misses.
+    fn ink(image: &image::RgbaImage) -> (f64, f64) {
+        let mut lit = 0u64;
+        let mut total = 0u64;
+        for pixel in image.pixels() {
+            let sum = pixel.0[0] as u64 + pixel.0[1] as u64 + pixel.0[2] as u64;
+            total += sum;
+            if sum > 0 {
+                lit += 1;
+            }
+        }
+        let count = (image.width() as u64 * image.height() as u64).max(1);
+        (lit as f64 / count as f64, total as f64 / count as f64)
     }
 
     #[test]
@@ -484,5 +591,54 @@ mod tests {
             capture_rect_with_backend(virtual_screen_rect(), Backend::Dxgi).unwrap();
         assert_eq!(backend, Backend::Dxgi);
         assert!(image.width() > 0 && image.height() > 0);
+
+        // A desktop is never uniformly black, so an all-zero frame means the
+        // duplication handed back an empty surface.
+        let (lit_fraction, mean) = ink(&image);
+        assert!(
+            lit_fraction > 0.5 && mean > 1.0,
+            "DXGI returned a blank frame: {:.1}% of pixels lit, mean channel sum {mean:.1}",
+            lit_fraction * 100.0
+        );
+    }
+
+    /// The two backends look at the same desktop, so their captures must agree
+    /// on roughly how much light is in it. This is what catches one backend
+    /// going blank while the other still works.
+    #[test]
+    #[ignore = "requires an interactive Windows desktop"]
+    fn both_backends_agree_on_what_is_on_screen() {
+        let rect = virtual_screen_rect();
+        let (gdi, _) = capture_rect_with_backend(rect, Backend::Gdi).unwrap();
+        let (dxgi, _) = capture_rect_with_backend(rect, Backend::Dxgi).unwrap();
+        assert_eq!((gdi.width(), gdi.height()), (dxgi.width(), dxgi.height()));
+
+        let (_, gdi_mean) = ink(&gdi);
+        let (_, dxgi_mean) = ink(&dxgi);
+        let ratio = gdi_mean.max(dxgi_mean) / gdi_mean.min(dxgi_mean).max(f64::EPSILON);
+        assert!(
+            ratio < 1.5,
+            "the backends disagree about the screen: gdi mean {gdi_mean:.1}, dxgi mean {dxgi_mean:.1}"
+        );
+    }
+
+    /// Capturing on a worker thread and joining it must not take the process
+    /// down.
+    ///
+    /// The cached D3D device lives in thread-local storage, and releasing it
+    /// from the TLS destructor — which runs during thread teardown — faulted
+    /// inside the graphics runtime, killing the process with a DXGI status
+    /// code. Screenshot work runs on Tokio's blocking pool, so every retired
+    /// thread crashed the server. `capture_rect_with_backend` is the whole
+    /// body here because the crash was in the teardown, not the capture.
+    #[test]
+    #[ignore = "requires an interactive Windows desktop"]
+    fn a_worker_thread_that_captured_can_exit() {
+        std::thread::spawn(|| {
+            capture_rect_with_backend(virtual_screen_rect(), Backend::Dxgi)
+                .expect("DXGI capture failed on the worker thread");
+        })
+        .join()
+        .expect("the capturing thread did not exit cleanly");
     }
 }

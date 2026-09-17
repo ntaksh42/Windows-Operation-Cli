@@ -16,6 +16,7 @@
 
 #![allow(dead_code)] // each test binary uses a different part of the harness
 
+use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -25,15 +26,18 @@ use windows::Win32::Graphics::Gdi::{ClientToScreen, UpdateWindow};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::Controls::{BST_CHECKED, BST_UNCHECKED};
+use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     ASFW_ANY, AllowSetForegroundWindow, BM_GETCHECK, BM_SETCHECK, BringWindowToTop, CW_USEDEFAULT,
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
     GetForegroundWindow, GetMessageW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
-    GetWindowThreadProcessId, HMENU, HWND_TOP, LB_ADDSTRING, LB_GETCURSEL, MSG, PostMessageW,
-    PostQuitMessage, RegisterClassW, SW_SHOW, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+    GetWindowThreadProcessId, HMENU, HWND_TOP, LB_ADDSTRING, LB_GETCURSEL, MSG, MoveWindow,
+    PostMessageW, PostQuitMessage, RegisterClassW, SW_MINIMIZE, SW_SHOW, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_SHOWWINDOW,
     SendMessageW, SetForegroundWindow, SetWindowPos, ShowWindow, TranslateMessage, WINDOW_EX_STYLE,
     WM_COMMAND, WM_DESTROY, WM_LBUTTONDOWN, WM_RBUTTONDOWN, WM_USER, WNDCLASSW,
-    WS_BORDER, WS_CHILD, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE, WindowFromPoint,
+    WS_BORDER, WS_CAPTION, WS_EX_DLGMODALFRAME, WS_POPUP, WS_SYSMENU, WS_CHILD, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
+    WindowFromPoint,
 };
 use windows::core::{PCWSTR, w};
 
@@ -44,11 +48,19 @@ pub const ID_BUTTON: i32 = 1001;
 pub const ID_EDIT: i32 = 1002;
 pub const ID_CHECKBOX: i32 = 1003;
 pub const ID_LISTBOX: i32 = 1004;
+pub const ID_STATUS: i32 = 1005;
+pub const ID_EDIT2: i32 = 1006;
 
 /// Control captions, used by tests to find the element in a Snapshot tree.
 pub const BUTTON_TEXT: &str = "Run Task";
 pub const CHECKBOX_TEXT: &str = "Enable Feature";
 pub const LIST_ITEMS: [&str; 3] = ["Alpha", "Bravo", "Charlie"];
+
+/// A read-only label, the kind of element that carries what a window is
+/// telling the user: a result, a status line, an error message. Nothing
+/// clicks it, so it only shows up in a capture if informative text is
+/// collected at all.
+pub const STATUS_TEXT: &str = "Ready: 3 items loaded";
 
 /// Something the window observed. Tests assert on these instead of on tool
 /// return strings.
@@ -70,6 +82,9 @@ type EventSender = Sender<Event>;
 
 static EVENT_SENDER: OnceLock<Mutex<Option<EventSender>>> = OnceLock::new();
 
+/// Handle of the live modal dialog, or 0. Written only by the window thread.
+static MODAL_HWND: AtomicIsize = AtomicIsize::new(0);
+
 fn emit(event: Event) {
     if let Ok(sender) = EVENT_SENDER.get_or_init(|| Mutex::new(None)).lock()
         && let Some(sender) = sender.as_ref()
@@ -80,6 +95,26 @@ fn emit(event: Event) {
 
 /// Posted to the window's thread to ask it to shut its message loop down.
 const WM_HARNESS_CLOSE: u32 = WM_USER + 1;
+/// Asks the window's own thread to put up a modal dialog. It has to be the
+/// window's thread: `DialogBox` runs its own message loop and blocks until the
+/// dialog closes, so posting from a test thread would deadlock the harness.
+const WM_HARNESS_SHOW_MODAL: u32 = WM_USER + 2;
+/// Asks the modal dialog to close.
+const WM_HARNESS_CLOSE_MODAL: u32 = WM_USER + 3;
+
+/// Title and control text of the modal dialog, for tests to assert on.
+pub const MODAL_TITLE: &str = "Harness Modal";
+pub const MODAL_BUTTON_TEXT: &str = "Confirm Modal";
+
+/// The modal dialog's window procedure: default behaviour is all it needs.
+unsafe extern "system" fn modal_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+}
 
 unsafe extern "system" fn window_proc(
     hwnd: HWND,
@@ -118,7 +153,61 @@ unsafe extern "system" fn window_proc(
                 }
                 LRESULT(0)
             }
+            WM_HARNESS_SHOW_MODAL => {
+                // A real modal: an owned popup with the owner disabled, which
+                // is what `WS_EX_DLGMODALFRAME` plus `EnableWindow(false)`
+                // produces and what UI Automation reports as IsModal.
+                let title = wide(MODAL_TITLE);
+                let class = w!("WindowsOperationCliHarnessModal");
+                let modal = CreateWindowExW(
+                    WS_EX_DLGMODALFRAME,
+                    class,
+                    PCWSTR(title.as_ptr()),
+                    WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+                    120,
+                    120,
+                    280,
+                    140,
+                    Some(hwnd),
+                    None,
+                    None,
+                    None,
+                );
+                if let Ok(modal) = modal {
+                    let button_text = wide(MODAL_BUTTON_TEXT);
+                    let _ = CreateWindowExW(
+                        WINDOW_EX_STYLE::default(),
+                        w!("BUTTON"),
+                        PCWSTR(button_text.as_ptr()),
+                        WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                        20,
+                        40,
+                        200,
+                        30,
+                        Some(modal),
+                        None,
+                        None,
+                        None,
+                    );
+                    let _ = EnableWindow(hwnd, false);
+                    MODAL_HWND.store(modal.0 as isize, Ordering::SeqCst);
+                }
+                LRESULT(0)
+            }
+            WM_HARNESS_CLOSE_MODAL => {
+                let modal = MODAL_HWND.swap(0, Ordering::SeqCst);
+                if modal != 0 {
+                    let _ = EnableWindow(hwnd, true);
+                    let _ = DestroyWindow(HWND(modal as *mut _));
+                }
+                LRESULT(0)
+            }
             WM_HARNESS_CLOSE => {
+                let modal = MODAL_HWND.swap(0, Ordering::SeqCst);
+                if modal != 0 {
+                    let _ = EnableWindow(hwnd, true);
+                    let _ = DestroyWindow(HWND(modal as *mut _));
+                }
                 let _ = DestroyWindow(hwnd);
                 LRESULT(0)
             }
@@ -128,6 +217,20 @@ unsafe extern "system" fn window_proc(
             }
             _ => DefWindowProcW(hwnd, message, wparam, lparam),
         }
+    }
+}
+
+/// Reads a control's text.
+fn control_text(handle: isize) -> String {
+    let hwnd = HWND(handle as *mut _);
+    unsafe {
+        let len = GetWindowTextLengthW(hwnd);
+        if len <= 0 {
+            return String::new();
+        }
+        let mut buffer = vec![0u16; len as usize + 1];
+        let copied = GetWindowTextW(hwnd, &mut buffer).max(0) as usize;
+        String::from_utf16_lossy(&buffer[..copied])
     }
 }
 
@@ -187,6 +290,7 @@ pub struct TestApp {
     hwnd: isize,
     button: isize,
     edit: isize,
+    edit2: isize,
     checkbox: isize,
     listbox: isize,
     client_origin: POINT,
@@ -201,6 +305,9 @@ pub mod layout {
     pub const EDIT: (i32, i32, i32, i32) = (20, 70, 240, 26);
     pub const CHECKBOX: (i32, i32, i32, i32) = (20, 110, 160, 24);
     pub const LISTBOX: (i32, i32, i32, i32) = (20, 145, 160, 80);
+    pub const STATUS: (i32, i32, i32, i32) = (20, 235, 260, 20);
+    /// A second edit field, so `MultiEdit` has more than one target to fill.
+    pub const EDIT2: (i32, i32, i32, i32) = (200, 110, 200, 26);
 }
 
 impl TestApp {
@@ -235,6 +342,16 @@ impl TestApp {
             };
             RegisterClassW(&class);
 
+            // The modal dialog's own class. `DefWindowProcW` is enough: the
+            // dialog only needs to exist, be owned, and carry a button.
+            let modal_class = WNDCLASSW {
+                lpfnWndProc: Some(modal_proc),
+                hInstance: instance,
+                lpszClassName: w!("WindowsOperationCliHarnessModal"),
+                ..Default::default()
+            };
+            RegisterClassW(&modal_class);
+
             let title_wide = wide(&title);
             let hwnd = match CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
@@ -244,7 +361,7 @@ impl TestApp {
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
                 420,
-                300,
+                340,
                 None,
                 None,
                 Some(instance),
@@ -264,14 +381,35 @@ impl TestApp {
                 layout::BUTTON,
                 ID_BUTTON,
             );
+            // ES_AUTOHSCROLL, without which a single-line EDIT accepts only as
+            // much text as fits its visible width and silently drops the rest.
+            // That is a property of this window, not of the tools under test,
+            // and it made long or non-Latin text look like a delivery bug:
+            // measured at 240px, 36 ASCII characters arrived as 32 and 20
+            // Japanese ones as 14, since the cut follows rendered width rather
+            // than length.
+            let edit_style = WS_CHILD
+                | WS_VISIBLE
+                | WS_TABSTOP
+                | WS_BORDER
+                | windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE(0x0000_0080);
             let edit = create_child(
                 instance,
                 hwnd,
                 w!("EDIT"),
                 "",
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER,
+                edit_style,
                 layout::EDIT,
                 ID_EDIT,
+            );
+            let edit2 = create_child(
+                instance,
+                hwnd,
+                w!("EDIT"),
+                "",
+                edit_style,
+                layout::EDIT2,
+                ID_EDIT2,
             );
             let checkbox = create_child(
                 instance,
@@ -283,6 +421,17 @@ impl TestApp {
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE(0x0000_0003),
                 layout::CHECKBOX,
                 ID_CHECKBOX,
+            );
+            // A plain label. Windows exposes it as a UIA Text element, which
+            // is how ordinary applications surface their readable state.
+            let _status = create_child(
+                instance,
+                hwnd,
+                w!("STATIC"),
+                STATUS_TEXT,
+                WS_CHILD | WS_VISIBLE,
+                layout::STATUS,
+                ID_STATUS,
             );
             let listbox = create_child(
                 instance,
@@ -317,6 +466,7 @@ impl TestApp {
                     hwnd.0 as isize,
                     button.0 as isize,
                     edit.0 as isize,
+                    edit2.0 as isize,
                     checkbox.0 as isize,
                     listbox.0 as isize,
                     origin,
@@ -334,13 +484,14 @@ impl TestApp {
             }
         });
 
-        let (hwnd, button, edit, checkbox, listbox, client_origin) =
+        let (hwnd, button, edit, edit2, checkbox, listbox, client_origin) =
             window_rx.recv_timeout(Duration::from_secs(5)).ok()?;
 
         let app = Self {
             hwnd,
             button,
             edit,
+            edit2,
             checkbox,
             listbox,
             client_origin,
@@ -365,6 +516,16 @@ impl TestApp {
 
     pub fn edit_hwnd(&self) -> isize {
         self.edit
+    }
+
+    /// The second edit field, so a test can fill more than one.
+    pub fn edit2_hwnd(&self) -> isize {
+        self.edit2
+    }
+
+    /// Current text of the second edit control.
+    pub fn edit2_text(&self) -> String {
+        control_text(self.edit2)
     }
 
     pub fn checkbox_hwnd(&self) -> isize {
@@ -413,6 +574,71 @@ impl TestApp {
         }
     }
 
+    /// Minimizes the window, so a test can check what the input tools do with
+    /// an element whose owner is iconic.
+    pub fn minimize(&self) {
+        unsafe {
+            let _ = ShowWindow(HWND(self.hwnd as *mut _), SW_MINIMIZE);
+        }
+    }
+
+    /// Moves the window by `(dx, dy)` without resizing it, so a test can make
+    /// saved element coordinates stale.
+    pub fn move_by(&self, dx: i32, dy: i32) {
+        let rect = self.window_rect();
+        unsafe {
+            let _ = MoveWindow(
+                HWND(self.hwnd as *mut _),
+                rect.left + dx,
+                rect.top + dy,
+                rect.right - rect.left,
+                rect.bottom - rect.top,
+                true,
+            );
+        }
+    }
+
+    /// Puts up an owned modal dialog and waits for it to appear.
+    ///
+    /// Returns its handle, or `None` if it never showed up.
+    pub fn show_modal(&self, timeout: Duration) -> Option<isize> {
+        unsafe {
+            let _ = PostMessageW(
+                Some(HWND(self.hwnd as *mut _)),
+                WM_HARNESS_SHOW_MODAL,
+                WPARAM(0),
+                LPARAM(0),
+            );
+        }
+        let deadline = Instant::now() + timeout;
+        loop {
+            let modal = MODAL_HWND.load(Ordering::SeqCst);
+            if modal != 0 {
+                return Some(modal);
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Closes the modal dialog and re-enables the main window.
+    pub fn close_modal(&self) {
+        unsafe {
+            let _ = PostMessageW(
+                Some(HWND(self.hwnd as *mut _)),
+                WM_HARNESS_CLOSE_MODAL,
+                WPARAM(0),
+                LPARAM(0),
+            );
+        }
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline && MODAL_HWND.load(Ordering::SeqCst) != 0 {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     /// Whether this window appears in the enumeration `Snapshot` scans.
     pub fn is_enumerable(&self) -> bool {
         windows_operation_cli::window::list_snapshot_windows()
@@ -422,16 +648,7 @@ impl TestApp {
 
     /// Current text of the edit control, read straight from the control.
     pub fn edit_text(&self) -> String {
-        let hwnd = HWND(self.edit as *mut _);
-        unsafe {
-            let len = GetWindowTextLengthW(hwnd);
-            if len <= 0 {
-                return String::new();
-            }
-            let mut buffer = vec![0u16; len as usize + 1];
-            let copied = GetWindowTextW(hwnd, &mut buffer).max(0) as usize;
-            String::from_utf16_lossy(&buffer[..copied])
-        }
+        control_text(self.edit)
     }
 
     /// Whether the checkbox is currently checked, read from the control.

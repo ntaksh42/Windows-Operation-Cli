@@ -110,6 +110,7 @@ pub const INTERACTIVE_CONTROL_TYPES: &[i32] = &[
 
 pub const WINDOW_CONTROL_TYPE: i32 = UIA_WindowControlTypeId.0;
 pub const DOCUMENT_CONTROL_TYPE: i32 = UIA_DocumentControlTypeId.0;
+pub const TITLE_BAR_CONTROL_TYPE: i32 = UIA_TitleBarControlTypeId.0;
 
 /// Lower-cased display name for a `UIA_*ControlTypeId` value, used to render
 /// UI Tree lines (`(x,y) controltype "name" [action: ...]`).
@@ -234,16 +235,44 @@ pub fn build_cache_request(
     Ok(cache)
 }
 
+/// Control types that carry information the caller reads but does not click:
+/// a calculator's result, a dialog's message, a status line, a field's label.
+///
+/// Without these a capture can show every button in a window and none of what
+/// the window is telling the user — which is most of what a caller needs in
+/// order to decide which button to press.
+pub const INFORMATIVE_CONTROL_TYPES: &[i32] = &[
+    UIA_TextControlTypeId.0,
+    UIA_StatusBarControlTypeId.0,
+    UIA_ProgressBarControlTypeId.0,
+];
+
 /// Builds the `FindAllBuildCache` filter condition: any of the interactive
-/// control types, any element exposing `ScrollPattern`, or a `Window`
-/// element (needed to detect nested modal dialogs). Filtering server-side
-/// keeps the marshaled element count down instead of fetching the whole
-/// subtree and discarding most of it client-side.
-pub fn build_condition(automation: &IUIAutomation) -> WinResult<IUIAutomationCondition> {
+/// control types, any element exposing `ScrollPattern`, or a `Window` element
+/// (needed to detect nested modal dialogs), plus — when `include_text` — the
+/// informative text types. Filtering server-side keeps the marshaled element
+/// count down instead of fetching the whole subtree and discarding most of it
+/// client-side.
+///
+/// `include_text` is a real cost, not a preference. Measured across a busy
+/// desktop: a foreground capture goes from 106ms to 111ms, but a whole-desktop
+/// `scope=all` sweep goes from 2.6s to 4.5s, because text nodes outnumber
+/// controls several times over. A caller scanning every window is looking for
+/// *which* window to work in; the text inside them is what the follow-up
+/// foreground capture is for.
+pub fn build_condition(
+    automation: &IUIAutomation,
+    include_text: bool,
+) -> WinResult<IUIAutomationCondition> {
     unsafe {
+        let informative: &[i32] = if include_text {
+            INFORMATIVE_CONTROL_TYPES
+        } else {
+            &[]
+        };
         let mut conditions: Vec<Option<IUIAutomationCondition>> =
-            Vec::with_capacity(INTERACTIVE_CONTROL_TYPES.len() + 2);
-        for &control_type in INTERACTIVE_CONTROL_TYPES {
+            Vec::with_capacity(INTERACTIVE_CONTROL_TYPES.len() + informative.len() + 2);
+        for &control_type in INTERACTIVE_CONTROL_TYPES.iter().chain(informative) {
             conditions.push(Some(automation.CreatePropertyCondition(
                 UIA_ControlTypePropertyId,
                 &variant_i4(control_type),
@@ -450,7 +479,18 @@ pub fn walk_window(
         let root = automation.ElementFromHandleBuildCache(hwnd, cache_request)?;
         let root_raw = read_element(&root);
         let mut elements = Vec::new();
-        if collect_cached_children(&root, None, reverse_children, &mut elements).is_err() {
+        let walked = collect_cached_children(&root, None, reverse_children, &mut elements);
+
+        // The cached walk descends through `GetCachedChildren`, which only
+        // returns children matching the cache request's TreeFilter. A window
+        // whose root's immediate children are all filtered out — Task Manager
+        // puts its controls under panes the filter rejects — yields an empty
+        // *successful* walk, and the tree is reported as having no controls
+        // at all. Fall back whenever the walk produced nothing, not only when
+        // it errored: `FindAllBuildCache` searches the whole subtree rather
+        // than stopping at the first non-matching level.
+        if walked.is_err() || elements.is_empty() {
+            elements.clear();
             let array = root.FindAllBuildCache(TreeScope_Subtree, condition, cache_request)?;
             let len = array.Length()?.max(0) as usize;
             elements.reserve(len);
@@ -621,6 +661,75 @@ pub fn invoke_matching_element(
     Ok(action)
 }
 
+/// What [`identify_point`] found at a screen coordinate, relative to the
+/// element a Snapshot recorded there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointIdentity {
+    /// The provider reports the recorded element (or one of its descendants)
+    /// at this point — the click will land on what the caller asked for.
+    Matches,
+    /// Something else is there now. The layout moved under the saved
+    /// coordinates.
+    Differs,
+    /// The provider could not be asked. Callers treat this as "no evidence
+    /// either way" and proceed, rather than blocking a click on a UIA hiccup.
+    Unknown,
+}
+
+/// Checks whether `identity`'s element is still the thing at its saved center.
+///
+/// Snapshot's generation counter only invalidates ids when a *new* capture is
+/// taken; a list that scrolls or a pane that relayouts in between leaves the
+/// ids valid and the coordinates stale, so a click lands on whatever moved
+/// into that spot. `ElementFromPoint` is one cross-process call that settles
+/// it: if the runtime id at the point no longer matches, the element moved.
+///
+/// A hit on a *descendant* counts as a match. Providers commonly report the
+/// innermost element at a point — the text inside a button rather than the
+/// button — and that click still reaches the recorded control.
+pub fn identify_point(identity: &crate::state::ElementNode, x: i32, y: i32) -> PointIdentity {
+    if identity.runtime_id.is_empty() {
+        return PointIdentity::Unknown;
+    }
+    if ensure_com_initialized().is_err() {
+        return PointIdentity::Unknown;
+    }
+    let Ok(automation) = create_automation() else {
+        return PointIdentity::Unknown;
+    };
+    unsafe {
+        let Ok(hit) = automation.ElementFromPoint(POINT { x, y }) else {
+            return PointIdentity::Unknown;
+        };
+        let Ok(walker) = automation.RawViewWalker() else {
+            return PointIdentity::Unknown;
+        };
+        // Walk up from the hit element: a match at any ancestor means the
+        // point is inside the recorded element.
+        let mut current = hit;
+        for _ in 0..ANCESTOR_PROBE_LIMIT {
+            let Ok(runtime_id) = current.GetRuntimeId() else {
+                return PointIdentity::Unknown;
+            };
+            match runtime_id_from_safe_array(runtime_id) {
+                Ok(id) if id == identity.runtime_id => return PointIdentity::Matches,
+                Ok(_) => {}
+                Err(_) => return PointIdentity::Unknown,
+            }
+            match walker.GetParentElement(&current) {
+                Ok(parent) => current = parent,
+                Err(_) => break,
+            }
+        }
+        PointIdentity::Differs
+    }
+}
+
+/// How far up the ancestor chain [`identify_point`] looks for the recorded
+/// element. Deep enough for the wrapper nesting web content produces, bounded
+/// so a pathological tree cannot stall a click.
+const ANCESTOR_PROBE_LIMIT: usize = 12;
+
 /// Clears the focused element's text through `ValuePattern::SetValue`.
 ///
 /// The keyboard route (Ctrl+A, Backspace) relies on the focused control
@@ -655,6 +764,27 @@ pub fn clear_focused_element_value() -> Result<bool, String> {
             Ok(()) => Ok(true),
             Err(_) => Ok(false),
         }
+    }
+}
+
+/// Reads the focused element's text through `ValuePattern`, when it exposes
+/// one.
+///
+/// Used to confirm a clipboard paste actually landed: the paste is a key
+/// chord whose effect the sender cannot otherwise observe, and the clipboard
+/// gets restored moments later, so a target that read it late produced a
+/// silent partial failure. `None` means "cannot tell" — no focused element, or
+/// one with no `ValuePattern` (a rich-text document, a custom canvas) — which
+/// callers treat as inconclusive rather than as failure.
+pub fn focused_element_value() -> Option<String> {
+    ensure_com_initialized().ok()?;
+    let automation = create_automation().ok()?;
+    unsafe {
+        let element = automation.GetFocusedElement().ok()?;
+        let pattern = element
+            .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+            .ok()?;
+        pattern.CurrentValue().ok().map(|value| value.to_string())
     }
 }
 
