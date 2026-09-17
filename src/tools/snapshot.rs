@@ -381,8 +381,19 @@ fn format_tree_line(node: &state::ElementNode, action: &str) -> String {
     let parent = node
         .parent_id
         .map_or_else(|| "none".to_string(), |id| id.to_string());
+    // A control with no accessible name is reported as an anonymous button or
+    // checkbox, which tells the caller nothing about which one it is — a file
+    // list shows a column of identical `checkbox ""` rows. Its AutomationId
+    // usually does say ("SelectionCheckbox", "CloseButton"), so fall back to
+    // that. Only when the name is empty: for a named control the id is
+    // redundant, and every line is one the caller has to read.
+    let identity = if node.name.trim().is_empty() && !node.automation_id.trim().is_empty() {
+        format!(", automation_id={}", node.automation_id)
+    } else {
+        String::new()
+    };
     format!(
-        "({},{}) {} \"{}\"  [id={}, parent={}, actions={}, action: {action}]",
+        "({},{}) {} \"{}\"  [id={}, parent={}, actions={}{identity}, action: {action}]",
         node.center.0,
         node.center.1,
         node.control_type,
@@ -1847,6 +1858,54 @@ mod tests {
                 state::element_id(7, 3),
                 state::element_id(7, 1)
             )
+        );
+    }
+
+    #[test]
+    fn an_unnamed_control_is_identified_by_its_automation_id() {
+        // Measured in Files: a file list shows a column of `checkbox ""`
+        // rows, each with a meaningful AutomationId the caller never saw.
+        let node = state::ElementNode {
+            element_id: state::element_id(1, 0),
+            parent_id: None,
+            owner_handle: 0,
+            runtime_id: Vec::new(),
+            automation_id: "SelectionCheckbox".to_string(),
+            supported_actions: vec![state::SupportedAction::Toggle],
+            name: String::new(),
+            control_type: "checkbox".to_string(),
+            center: (10, 20),
+            bounding_box: (0, 0, 20, 40),
+            has_focus: false,
+        };
+        let line = format_tree_line(&node, "click");
+        assert!(
+            line.contains("automation_id=SelectionCheckbox"),
+            "an unnamed control should carry its id: {line}"
+        );
+    }
+
+    #[test]
+    fn a_named_control_does_not_repeat_its_automation_id() {
+        // The name already identifies it, and every line is one the caller
+        // has to read.
+        let node = state::ElementNode {
+            element_id: state::element_id(1, 0),
+            parent_id: None,
+            owner_handle: 0,
+            runtime_id: Vec::new(),
+            automation_id: "SubmitButton".to_string(),
+            supported_actions: vec![state::SupportedAction::Invoke],
+            name: "Submit".to_string(),
+            control_type: "button".to_string(),
+            center: (10, 20),
+            bounding_box: (0, 0, 20, 40),
+            has_focus: false,
+        };
+        let line = format_tree_line(&node, "click");
+        assert!(
+            !line.contains("automation_id"),
+            "a named control should not repeat its id: {line}"
         );
     }
 
