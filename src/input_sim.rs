@@ -222,6 +222,11 @@ fn input_block_hint() -> String {
         }
     };
 
+    if is_lock_screen_present() {
+        return "The screen is locked: Windows shows the lock screen over every window and \
+                discards injected input until the session is unlocked."
+            .to_string();
+    }
     if title.is_empty() {
         return "The session may have no interactive desktop: a locked screen, or a service \
                 or disconnected remote session."
@@ -232,6 +237,19 @@ fn input_block_hint() -> String {
          this session to it — move it aside or restart the server elevated; otherwise the \
          session may have no interactive desktop."
     )
+}
+
+/// Whether the lock screen is covering the desktop.
+///
+/// It is an ordinary window (`LockScreenBackstopFrame`) rather than a separate
+/// desktop, so `OpenInputDesktop` still succeeds and the usual checks see
+/// nothing wrong — while every click lands on the lock screen and is
+/// discarded.
+fn is_lock_screen_present() -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::FindWindowW;
+    use windows::core::w;
+
+    unsafe { FindWindowW(w!("LockScreenBackstopFrame"), None) }.is_ok_and(|hwnd| !hwnd.is_invalid())
 }
 
 /// The system double-click time, in milliseconds.

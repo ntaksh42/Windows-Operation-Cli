@@ -75,6 +75,23 @@ impl ScanOptions {
     }
 }
 
+/// Whether two same-titled windows are two views of one application rather
+/// than two applications.
+///
+/// The same process is the simple case. The other is a packaged (UWP) app:
+/// Windows shows it through an `ApplicationFrameWindow` owned by
+/// `ApplicationFrameHost.exe` with the app's own `CoreWindow` hosted inside,
+/// so the pair carries one title across two processes.
+fn same_application(a: &window::SnapshotWindow, b: &window::SnapshotWindow) -> bool {
+    if a.pid == b.pid {
+        return true;
+    }
+    let frame_and_core = |x: &window::SnapshotWindow, y: &window::SnapshotWindow| {
+        x.class_name == "ApplicationFrameWindow" && y.class_name.starts_with("Windows.UI.Core")
+    };
+    frame_and_core(a, b) || frame_and_core(b, a)
+}
+
 fn select_scan_targets<'a>(
     options: &ScanOptions,
     foreground: Option<&window::WindowInfo>,
@@ -120,18 +137,28 @@ fn select_scan_targets<'a>(
             return Err(format!("Window not found: {query}"));
         };
         let best_len = best.title.chars().count();
+        // Two equally good matches are not always two answers. A packaged
+        // (UWP) app is shown through a pair: `ApplicationFrameHost.exe` owns
+        // the `ApplicationFrameWindow` that carries the title, and the app's
+        // own process owns the `CoreWindow` inside it. They share a title and
+        // have *different* pids, so treating that as ambiguous made every
+        // packaged app unreachable by name. Only a rival that is neither half
+        // of such a pair is a real choice for the caller.
         if scored.get(1).is_some_and(|(candidate, score)| {
             (*score - *best_score).abs() < f64::EPSILON
                 && candidate.title.chars().count() == best_len
+                && !same_application(best, candidate)
         }) {
             return Err(format!("Window query is ambiguous: {query}"));
         }
+        // Scan the matched window plus everything belonging to the same
+        // application: its other windows, and — for a packaged app — the other
+        // half of the frame/core pair, which lives in a different process and
+        // is where the controls actually are.
         let mut application_windows = vec![*best];
-        application_windows.extend(
-            windows
-                .iter()
-                .filter(|candidate| candidate.handle != best.handle && candidate.pid == best.pid),
-        );
+        application_windows.extend(windows.iter().filter(|candidate| {
+            candidate.handle != best.handle && same_application(best, candidate)
+        }));
         return Ok(application_windows);
     }
 
@@ -1579,6 +1606,9 @@ mod tests {
 
     #[test]
     fn identical_titles_are_still_reported_as_ambiguous() {
+        // Two separate processes answering to one name is a real choice, and
+        // picking one silently would act on the wrong window. (`snapshot_window`
+        // gives each handle its own pid, so these are distinct applications.)
         let windows = vec![
             snapshot_window(1, "Settings"),
             snapshot_window(2, "Settings"),
@@ -1680,6 +1710,36 @@ mod tests {
         assert_eq!(
             selected.iter().map(|w| w.handle).collect::<Vec<_>>(),
             vec![1, 2]
+        );
+    }
+
+    #[test]
+    fn a_packaged_apps_frame_and_core_windows_are_one_application() {
+        // Measured on Calculator: the `ApplicationFrameWindow` belongs to
+        // `ApplicationFrameHost.exe` and the `CoreWindow` to the app itself,
+        // so the pair shares a title across two pids. Rejecting that as
+        // ambiguous made every packaged app unreachable by name.
+        let windows = vec![
+            window::SnapshotWindow::new(
+                1,
+                "電卓".to_string(),
+                "ApplicationFrameWindow".into(),
+                24160,
+            ),
+            window::SnapshotWindow::new(
+                2,
+                "電卓".to_string(),
+                "Windows.UI.Core.CoreWindow".into(),
+                15504,
+            ),
+        ];
+        let options = ScanOptions::resolve(None, Some("電卓".to_string()), None).unwrap();
+        let selected =
+            select_scan_targets(&options, None, &windows).expect("should not be ambiguous");
+        assert_eq!(
+            selected.len(),
+            2,
+            "both halves are scanned; the controls are in the core window"
         );
     }
 
