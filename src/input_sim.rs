@@ -222,7 +222,8 @@ fn input_block_hint() -> String {
         }
     };
 
-    if is_lock_screen_present() {
+    let (cursor_x, cursor_y) = get_cursor_pos();
+    if lock_screen_covers(cursor_x, cursor_y) {
         return "The screen is locked: Windows shows the lock screen over every window and \
                 discards injected input until the session is unlocked."
             .to_string();
@@ -239,17 +240,28 @@ fn input_block_hint() -> String {
     )
 }
 
-/// Whether the lock screen is covering the desktop.
+/// Whether the lock screen is covering the point input is aimed at.
 ///
 /// It is an ordinary window (`LockScreenBackstopFrame`) rather than a separate
 /// desktop, so `OpenInputDesktop` still succeeds and the usual checks see
 /// nothing wrong — while every click lands on the lock screen and is
 /// discarded.
-fn is_lock_screen_present() -> bool {
-    use windows::Win32::UI::WindowsAndMessaging::FindWindowW;
+///
+/// Existence is not the test: the window outlives the lock and stays visible
+/// afterwards, so `FindWindowW` alone reports a lock that has already been
+/// cleared. Ask what is actually at the cursor.
+fn lock_screen_covers(x: i32, y: i32) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, WindowFromPoint};
     use windows::core::w;
 
-    unsafe { FindWindowW(w!("LockScreenBackstopFrame"), None) }.is_ok_and(|hwnd| !hwnd.is_invalid())
+    let Ok(lock) = (unsafe { FindWindowW(w!("LockScreenBackstopFrame"), None) }) else {
+        return false;
+    };
+    if lock.is_invalid() {
+        return false;
+    }
+    let at_point = unsafe { WindowFromPoint(POINT { x, y }) };
+    at_point == lock
 }
 
 /// The system double-click time, in milliseconds.
