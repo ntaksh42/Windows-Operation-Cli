@@ -92,70 +92,79 @@ fn same_application(a: &window::SnapshotWindow, b: &window::SnapshotWindow) -> b
     frame_and_core(a, b) || frame_and_core(b, a)
 }
 
+/// Finds the one window whose title best matches `query`.
+pub(crate) fn find_window<'a>(
+    query: &str,
+    windows: &'a [window::SnapshotWindow],
+) -> Result<&'a window::SnapshotWindow, String> {
+    let query = query.to_lowercase();
+    // Window titles carry document names, counts, and the application
+    // name ("repo and 6 more pages - Personal - Microsoft Edge"), so a
+    // caller names the part they know. Whole-string `ratio` scores such a
+    // query by how much of the title it fails to cover, which put even a
+    // verbatim prefix of a long title under the cutoff. Score by the best
+    // matching window of the title instead, keeping `ratio` so a query
+    // that does span the whole title still wins over a partial hit.
+    let mut scored: Vec<_> = windows
+        .iter()
+        .map(|candidate| {
+            let title = candidate.title.to_lowercase();
+            let mut score = crate::fuzzy::ratio(&query, &title);
+            // `partial_ratio` slides the shorter string across the longer
+            // one, so a title shorter than the query scores 100 whenever
+            // the title appears anywhere in it — "Claude" would beat
+            // "Claude Settings" for the query "Claude Settings". Trust it
+            // only when the query is the shorter side, which is the case
+            // it exists for: naming part of a long title.
+            if query.chars().count() <= title.chars().count() {
+                score = score.max(crate::fuzzy::partial_ratio(&query, &title));
+            }
+            (candidate, score)
+        })
+        .filter(|(_, score)| *score >= 70.0)
+        .collect();
+    // Partial matching scores every title containing the query at 100, so
+    // ties are now common ("GitHub" against two open tabs). Prefer the
+    // shortest title among equals: it is the one the query covers most of,
+    // and therefore the closest thing to what was asked for. Only a tie on
+    // both score and length is genuinely ambiguous.
+    scored.sort_by(|a, b| {
+        b.1.total_cmp(&a.1)
+            .then_with(|| a.0.title.chars().count().cmp(&b.0.title.chars().count()))
+    });
+    let Some((best, best_score)) = scored.first() else {
+        return Err(format!("Window not found: {query}"));
+    };
+    let best_len = best.title.chars().count();
+    // Two equally good matches are not always two answers. A packaged
+    // (UWP) app is shown through a pair: `ApplicationFrameHost.exe` owns
+    // the `ApplicationFrameWindow` that carries the title, and the app's
+    // own process owns the `CoreWindow` inside it. They share a title and
+    // have *different* pids, so treating that as ambiguous made every
+    // packaged app unreachable by name. Only a rival that is neither half
+    // of such a pair is a real choice for the caller.
+    if scored.get(1).is_some_and(|(candidate, score)| {
+        (*score - *best_score).abs() < f64::EPSILON
+            && candidate.title.chars().count() == best_len
+            && !same_application(best, candidate)
+    }) {
+        return Err(format!("Window query is ambiguous: {query}"));
+    }
+    Ok(best)
+}
+
 fn select_scan_targets<'a>(
     options: &ScanOptions,
     foreground: Option<&window::WindowInfo>,
     windows: &'a [window::SnapshotWindow],
 ) -> Result<Vec<&'a window::SnapshotWindow>, String> {
     if let Some(query) = options.window.as_deref() {
-        let query = query.to_lowercase();
-        // Window titles carry document names, counts, and the application
-        // name ("repo and 6 more pages - Personal - Microsoft Edge"), so a
-        // caller names the part they know. Whole-string `ratio` scores such a
-        // query by how much of the title it fails to cover, which put even a
-        // verbatim prefix of a long title under the cutoff. Score by the best
-        // matching window of the title instead, keeping `ratio` so a query
-        // that does span the whole title still wins over a partial hit.
-        let mut scored: Vec<_> = windows
-            .iter()
-            .map(|candidate| {
-                let title = candidate.title.to_lowercase();
-                let mut score = crate::fuzzy::ratio(&query, &title);
-                // `partial_ratio` slides the shorter string across the longer
-                // one, so a title shorter than the query scores 100 whenever
-                // the title appears anywhere in it — "Claude" would beat
-                // "Claude Settings" for the query "Claude Settings". Trust it
-                // only when the query is the shorter side, which is the case
-                // it exists for: naming part of a long title.
-                if query.chars().count() <= title.chars().count() {
-                    score = score.max(crate::fuzzy::partial_ratio(&query, &title));
-                }
-                (candidate, score)
-            })
-            .filter(|(_, score)| *score >= 70.0)
-            .collect();
-        // Partial matching scores every title containing the query at 100, so
-        // ties are now common ("GitHub" against two open tabs). Prefer the
-        // shortest title among equals: it is the one the query covers most of,
-        // and therefore the closest thing to what was asked for. Only a tie on
-        // both score and length is genuinely ambiguous.
-        scored.sort_by(|a, b| {
-            b.1.total_cmp(&a.1)
-                .then_with(|| a.0.title.chars().count().cmp(&b.0.title.chars().count()))
-        });
-        let Some((best, best_score)) = scored.first() else {
-            return Err(format!("Window not found: {query}"));
-        };
-        let best_len = best.title.chars().count();
-        // Two equally good matches are not always two answers. A packaged
-        // (UWP) app is shown through a pair: `ApplicationFrameHost.exe` owns
-        // the `ApplicationFrameWindow` that carries the title, and the app's
-        // own process owns the `CoreWindow` inside it. They share a title and
-        // have *different* pids, so treating that as ambiguous made every
-        // packaged app unreachable by name. Only a rival that is neither half
-        // of such a pair is a real choice for the caller.
-        if scored.get(1).is_some_and(|(candidate, score)| {
-            (*score - *best_score).abs() < f64::EPSILON
-                && candidate.title.chars().count() == best_len
-                && !same_application(best, candidate)
-        }) {
-            return Err(format!("Window query is ambiguous: {query}"));
-        }
+        let best = find_window(query, windows)?;
         // Scan the matched window plus everything belonging to the same
         // application: its other windows, and — for a packaged app — the other
         // half of the frame/core pair, which lives in a different process and
         // is where the controls actually are.
-        let mut application_windows = vec![*best];
+        let mut application_windows = vec![best];
         application_windows.extend(windows.iter().filter(|candidate| {
             candidate.handle != best.handle && same_application(best, candidate)
         }));

@@ -23,6 +23,7 @@ Fast capture: text summary + PNG. No UI tree.
 | use_annotation | bool | false | currently a no-op — accepted but ignored (unlike Snapshot's) |
 | width_reference_line / height_reference_line | int? | null | grid lines; both required to take effect |
 | display | [int]? | null | restrict capture to display indices (see DisplayInventory) |
+| window | string? | null | fuzzy title match; capture only that window, even when covered. Incompatible with `display` |
 
 Output text includes cursor position, screenshot size, virtual-desktop and window tables, plus the coordinate conversion to apply before passing image pixels to any `loc=` argument:
 
@@ -30,6 +31,18 @@ Output text includes cursor position, screenshot size, virtual-desktop and windo
 - `Screenshot Coordinate Transform: screen = (origin_x + image_x × S, origin_y + image_y × S)` — emitted when the capture origin is non-zero (a monitor left of/above the primary, or a `display`-restricted capture). `origin_x`/`origin_y` may be negative; preserve the sign. Scale alone is wrong here.
 
 Use whichever line the output actually reports.
+
+Screen vs. window capture:
+
+| | screen (default / `display`) | `window` |
+|---|---|---|
+| Method | GDI `BitBlt` of the composed desktop (DXGI only as fallback) | `PrintWindow(PW_RENDERFULLCONTENT)`: the window renders itself |
+| Shows | exactly what is visible, including windows in front | the window alone, even when covered or partly off-screen |
+| Use for | deciding where to click; verifying what the user sees | reading a background window without activating it |
+| Coordinates | as above (transform only when the origin is non-zero) | always a `Screenshot Coordinate Transform` with origin = window's top-left |
+| Fails when | — | window minimized (error: restore it first) |
+
+With `window`, the output has `Screenshot Window: <title>` and `Screenshot Backend: printwindow`. If the window cannot render itself (some GPU-rendered apps), it falls back to the window's screen region and says so in the backend line; windows in front of it then appear in the image. A coordinate taken from a window capture is only clickable if nothing covers that point — bring the window forward (`App`) before clicking.
 
 ### Snapshot
 

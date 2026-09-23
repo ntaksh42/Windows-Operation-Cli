@@ -6,6 +6,12 @@
 
 #![cfg(target_os = "windows")]
 
+mod harness;
+
+use std::time::Duration;
+
+use harness::{TestApp, desktop_lock};
+use windows_operation_cli::capture::{Backend, capture_rect_with_backend};
 use windows_operation_cli::params::BoolOrString;
 use windows_operation_cli::tools::display_inventory::display_inventory;
 use windows_operation_cli::tools::screenshot::{ScreenshotParams, screenshot};
@@ -16,6 +22,7 @@ fn params() -> ScreenshotParams {
         width_reference_line: None,
         height_reference_line: None,
         display: None,
+        window: None,
     }
 }
 
@@ -150,4 +157,124 @@ fn the_display_inventory_lists_real_displays() {
         1,
         "there should be exactly one primary display: {json}"
     );
+}
+
+/// Reads the `Screenshot Region: (l,t,r,b)` line back as a rectangle.
+fn reported_region(text: &str) -> windows::Win32::Foundation::RECT {
+    let line = text
+        .lines()
+        .find_map(|line| line.strip_prefix("Screenshot Region: "))
+        .unwrap_or_else(|| panic!("the response reports no region:\n{text}"));
+    let values: Vec<i32> = line
+        .trim_matches(|c| c == '(' || c == ')')
+        .split(',')
+        .map(|value| value.parse().expect("region values are integers"))
+        .collect();
+    windows::Win32::Foundation::RECT {
+        left: values[0],
+        top: values[1],
+        right: values[2],
+        bottom: values[3],
+    }
+}
+
+/// The point of `window`: a window covered by another is still captured as
+/// itself, not as whatever sits in front of it.
+#[test]
+#[ignore = "requires an interactive Windows desktop session; run with --ignored"]
+fn a_covered_window_is_captured_as_itself() {
+    let _desktop = desktop_lock();
+    let Some(back) = TestApp::launch("Window Capture Back") else {
+        return;
+    };
+    let Some(front) = TestApp::launch("Window Capture Front") else {
+        return;
+    };
+    let back_rect = back.window_rect();
+    windows_operation_cli::window::resize_window(
+        front.hwnd(),
+        Some((back_rect.left, back_rect.top)),
+        Some((
+            back_rect.right - back_rect.left,
+            back_rect.bottom - back_rect.top,
+        )),
+    )
+    .expect("failed to move the front window over the back one");
+    front
+        .wait_until_on_top(Duration::from_secs(3))
+        .expect("the front window never came to the top");
+
+    let output = screenshot(&ScreenshotParams {
+        window: Some("Window Capture Back".to_string()),
+        ..params()
+    })
+    .expect("window screenshot failed");
+    assert!(
+        output
+            .text
+            .contains("Screenshot Window: Window Capture Back"),
+        "the response names the wrong window:\n{}",
+        output.text
+    );
+    assert!(
+        output.text.contains("Screenshot Backend: printwindow"),
+        "the covered window was not rendered by itself:\n{}",
+        output.text
+    );
+
+    // What the screen shows there is the front window. The capture must not
+    // be that.
+    let region = reported_region(&output.text);
+    let (on_screen, _) = capture_rect_with_backend(region, Backend::Gdi).expect("GDI failed");
+    let captured = image::load_from_memory(&output.png_bytes)
+        .expect("the response was not a decodable image")
+        .to_rgba8();
+    assert_eq!(
+        (captured.width(), captured.height()),
+        (on_screen.width(), on_screen.height()),
+        "the window capture is not the size of the region it reports"
+    );
+    assert!(
+        captured
+            .pixels()
+            .zip(on_screen.pixels())
+            .any(|(a, b)| a != b),
+        "the window capture is identical to the window covering it"
+    );
+    assert!(
+        lit_fraction(&output.png_bytes) > 0.5,
+        "the window capture is blank"
+    );
+}
+
+/// A minimized window has nothing to render; saying so beats a blank image.
+#[test]
+#[ignore = "requires an interactive Windows desktop session; run with --ignored"]
+fn a_minimized_window_is_refused() {
+    let _desktop = desktop_lock();
+    let Some(app) = TestApp::launch("Window Capture Minimized") else {
+        return;
+    };
+    app.minimize();
+    std::thread::sleep(Duration::from_millis(300));
+
+    let error = screenshot(&ScreenshotParams {
+        window: Some("Window Capture Minimized".to_string()),
+        ..params()
+    })
+    .err()
+    .expect("a minimized window should not be captured");
+    assert!(error.contains("minimized"), "unexpected error: {error}");
+}
+
+#[test]
+fn window_and_display_cannot_be_combined() {
+    let error = screenshot(&ScreenshotParams {
+        window: Some("anything".to_string()),
+        display: Some(windows_operation_cli::params::ListOrString::List(vec![0])),
+        ..params()
+    })
+    .err()
+    .expect("window with display should be rejected");
+    assert!(error.contains("display"), "unexpected error: {error}");
 }

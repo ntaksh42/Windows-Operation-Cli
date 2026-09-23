@@ -119,6 +119,7 @@ fn the_monitor_count_matches_the_displays_a_capture_accepts() {
             display: Some(windows_operation_cli::params::ListOrString::List(vec![
                 index as i32,
             ])),
+            window: None,
         })
         .unwrap_or_else(|error| {
             panic!("display {index} is within monitor_count but was refused: {error}")
@@ -132,6 +133,7 @@ fn the_monitor_count_matches_the_displays_a_capture_accepts() {
         display: Some(windows_operation_cli::params::ListOrString::List(vec![
             count as i32,
         ])),
+        window: None,
     });
     assert!(
         past_the_end.is_err(),

@@ -10,7 +10,7 @@ Rust MCP server for Windows desktop automation. Core loop: **observe → act →
 ## Core workflow
 
 1. **Observe** the screen:
-   - `Screenshot` — fast path: image + cursor position + window summaries. No element ids. Use for visual context and verification.
+   - `Screenshot` — fast path: image + cursor position + window summaries. No element ids. Use for visual context and verification. By default it captures the screen as seen; pass `window` (fuzzy title match) to capture just that window even while other windows cover it.
    - `Snapshot` — heavier path: UI accessibility tree with element ids and supported semantic actions. Use when you need to interact with controls. Scans only the foreground app by default; pass `window` (fuzzy title match) to target one app, or `scope="all"` for whole-desktop discovery. `use_vision=true` adds an annotated screenshot.
 2. **Act** on elements, preferring semantics over coordinates:
    - `InvokeElement` with an `element_id` from the **most recent** Snapshot — activates the control via UIA patterns (Invoke/Select/Toggle/Expand) without screen coordinates. Most reliable.
@@ -36,6 +36,7 @@ After acting, re-observe (`Screenshot` is usually enough) to verify the effect b
 | Goal | Tool |
 |---|---|
 | See the screen quickly | `Screenshot` |
+| See one window that may be covered | `Screenshot` with `window` (bring it forward with `App` before clicking what you saw) |
 | Find and target controls | `Snapshot` (then `InvokeElement`) |
 | Launch / focus / resize an app | `App` |
 | Run a command, script, or anything non-UI | `PowerShell` |

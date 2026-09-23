@@ -11,9 +11,12 @@ use std::env;
 use windows::Win32::Foundation::POINT;
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
-use crate::display;
+use image::ImageEncoder;
+use image::imageops::FilterType;
+
 use crate::params::{BoolOrString, ListOrString};
 use crate::tools::snapshot::{self, SnapshotParams};
+use crate::{capture, display, window};
 
 /// Screenshots are downscaled to fit within this size (before applying
 /// `WINDOWS_MCP_SCREENSHOT_SCALE`).
@@ -40,6 +43,10 @@ pub struct ScreenshotParams {
         description = "Zero-based active display indices to restrict the capture to; omit for the full virtual desktop."
     )]
     pub display: Option<ListOrString<i32>>,
+    #[schemars(
+        description = "Fuzzy title query for capturing one window, even while other windows cover it. Incompatible with display."
+    )]
+    pub window: Option<String>,
 }
 
 /// Text + PNG bytes making up a successful `Screenshot` response.
@@ -185,6 +192,12 @@ pub(crate) fn display_list_text(displays: &[display::Display]) -> String {
 /// expected to wrap it as `"Error capturing screenshot: {e}. Please try
 /// again."` per the tool's error contract.
 pub fn screenshot(params: &ScreenshotParams) -> Result<ScreenshotOutput, String> {
+    if let Some(query) = &params.window {
+        if params.display.is_some() {
+            return Err("window cannot be combined with display".to_string());
+        }
+        return screenshot_window(query, params);
+    }
     let result = snapshot::capture(&SnapshotParams {
         scope: None,
         window: None,
@@ -203,6 +216,64 @@ pub fn screenshot(params: &ScreenshotParams) -> Result<ScreenshotOutput, String>
             .png_bytes
             .ok_or_else(|| "Screenshot capture returned no image".to_string())?,
     })
+}
+
+/// Captures the one window matching `query`. The image covers that window
+/// only, so the response always states its origin for coordinate conversion.
+fn screenshot_window(query: &str, params: &ScreenshotParams) -> Result<ScreenshotOutput, String> {
+    let windows = window::list_snapshot_windows();
+    let target = snapshot::find_window(query, &windows)?;
+    let (captured, bounds, method) = capture::capture_window(target.handle)?;
+
+    let (orig_width, orig_height) = (captured.width(), captured.height());
+    let scale = combined_scale(orig_width, orig_height, resolve_scale());
+    let mut image = if scale != 1.0 {
+        let (w, h) = scaled_size(orig_width, orig_height, scale);
+        image::imageops::resize(&captured, w.max(1), h.max(1), FilterType::Lanczos3)
+    } else {
+        captured
+    };
+    if let (Some(w), Some(h)) = (params.width_reference_line, params.height_reference_line) {
+        draw_grid_lines(&mut image, w, h);
+    }
+    let mut png_bytes = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut png_bytes)
+        .write_image(
+            image.as_raw(),
+            image.width(),
+            image.height(),
+            image::ExtendedColorType::Rgba8,
+        )
+        .map_err(|e| format!("PNG encoding failed: {e}"))?;
+
+    let (cx, cy) = cursor_position();
+    let mut text = format!("Cursor Position: ({cx}, {cy})\n");
+    let coord_scale = if scale < 1.0 {
+        let coord_scale = (1.0 / scale * 1_000_000.0).round() / 1_000_000.0;
+        text += &format!(
+            "Screenshot Original Size: ({orig_width},{orig_height})\n{}\n",
+            coordinate_scale_text(coord_scale)
+        );
+        coord_scale
+    } else {
+        text += &format!("Screenshot Size: ({},{})\n", image.width(), image.height());
+        1.0
+    };
+    text += &coordinate_transform_text(coord_scale, bounds.left, bounds.top);
+    text += &format!(
+        "\nScreenshot Window: {}\nScreenshot Region: ({},{},{},{})\n\
+         Coordinate Space: Virtual desktop coordinates\n",
+        target.title, bounds.left, bounds.top, bounds.right, bounds.bottom
+    );
+    text += &match method {
+        capture::WindowCapture::PrintWindow => "Screenshot Backend: printwindow\n".to_string(),
+        capture::WindowCapture::ScreenRegion(backend) => format!(
+            "Screenshot Backend: {} (the window could not render itself; this is its screen \
+             region, so windows in front of it appear in the image)\n",
+            backend.name()
+        ),
+    };
+    Ok(ScreenshotOutput { text, png_bytes })
 }
 
 #[cfg(test)]

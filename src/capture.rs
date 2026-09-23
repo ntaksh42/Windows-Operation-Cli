@@ -5,12 +5,15 @@ use std::env;
 use std::ffi::c_void;
 use std::mem::ManuallyDrop;
 
-use windows::Win32::Foundation::{HMODULE, RECT};
+use windows::Win32::Foundation::{HMODULE, HWND, RECT};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAP_READ,
     D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
+};
+use windows::Win32::Graphics::Dwm::{
+    DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_MODE_ROTATION_ROTATE90, DXGI_MODE_ROTATION_ROTATE180, DXGI_MODE_ROTATION_ROTATE270,
@@ -20,10 +23,13 @@ use windows::Win32::Graphics::Dxgi::{
 };
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC,
-    DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits, ReleaseDC, SRCCOPY, SelectObject,
+    DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits, HDC, ReleaseDC, SRCCOPY,
+    SelectObject,
 };
+use windows::Win32::Storage::Xps::{PRINT_WINDOW_FLAGS, PrintWindow};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    GetSystemMetrics, GetWindowRect, IsIconic, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
 };
 use windows::core::Interface;
 
@@ -113,8 +119,8 @@ pub fn virtual_screen_rect() -> RECT {
 }
 
 /// Captures a rectangle and reports the backend that actually succeeded.
-/// `auto` prefers Desktop Duplication and falls back to GDI when unavailable
-/// (for example on a locked desktop or an unsupported display adapter).
+/// `auto` prefers GDI and falls back to Desktop Duplication only when GDI
+/// fails or hands back a blank frame.
 pub fn capture_rect_with_backend(
     rect: RECT,
     backend: Backend,
@@ -126,15 +132,21 @@ pub fn capture_rect_with_backend(
     }
 
     match backend {
-        // Desktop Duplication can succeed and still hand back an empty
-        // surface: a protected-content window on screen, a session that
-        // disallows duplication, a stale frame after a mode change. The call
-        // reports no error, so only the pixels give it away. Fall back to GDI
-        // for a blank frame as well as for an outright failure — `auto` exists
-        // to return a usable screenshot, not to insist on one backend.
-        Backend::Auto => match unsafe { capture_rect_dxgi(rect) } {
-            Ok(image) if !is_blank(&image) => Ok((image, Backend::Dxgi)),
-            _ => capture_gdi_image(rect, width, height).map(|image| (image, Backend::Gdi)),
+        // GDI reads the DWM-composed desktop on every call, so it has none of
+        // Desktop Duplication's black-frame modes: a fresh duplication's empty
+        // first frame, an idle desktop presenting nothing, duplication lost to
+        // manual input or a mode change. Duplication stays as the fallback for
+        // the rare session where GDI fails or reads back nothing.
+        Backend::Auto => match capture_gdi_image(rect, width, height) {
+            Ok(image) if !is_blank(&image) => Ok((image, Backend::Gdi)),
+            gdi => match unsafe { capture_rect_dxgi(rect) } {
+                Ok(image) if !is_blank(&image) => Ok((image, Backend::Dxgi)),
+                // Neither produced content. A genuinely dark screen is still a
+                // screenshot, so prefer GDI's frame over an error.
+                dxgi => gdi
+                    .map(|image| (image, Backend::Gdi))
+                    .or_else(|_| dxgi.map(|image| (image, Backend::Dxgi))),
+            },
         },
         Backend::Gdi => capture_gdi_image(rect, width, height).map(|image| (image, Backend::Gdi)),
         Backend::Dxgi => unsafe { capture_rect_dxgi(rect) }.map(|image| (image, Backend::Dxgi)),
@@ -434,6 +446,31 @@ pub fn dxgi_available() -> Result<(), String> {
 /// Captures `rect` via GDI `BitBlt` + `GetDIBits`, returning RGBA bytes.
 unsafe fn capture_rect_gdi(rect: RECT, width: i32, height: i32) -> Result<Vec<u8>, String> {
     unsafe {
+        render_gdi(width, height, |hdc_mem, hdc_screen| {
+            BitBlt(
+                hdc_mem,
+                0,
+                0,
+                width,
+                height,
+                Some(hdc_screen),
+                rect.left,
+                rect.top,
+                SRCCOPY,
+            )
+            .map_err(|e| format!("BitBlt failed: {e}"))
+        })
+    }
+}
+
+/// Has `draw` paint a `width`x`height` memory bitmap, then reads it back as
+/// RGBA bytes. `draw` receives the memory DC and the screen DC.
+unsafe fn render_gdi(
+    width: i32,
+    height: i32,
+    draw: impl FnOnce(HDC, HDC) -> Result<(), String>,
+) -> Result<Vec<u8>, String> {
+    unsafe {
         let hdc_screen = GetDC(None);
         if hdc_screen.is_invalid() {
             return Err("GetDC returned a null device context".to_string());
@@ -453,17 +490,7 @@ unsafe fn capture_rect_gdi(rect: RECT, width: i32, height: i32) -> Result<Vec<u8
         }
 
         let old_obj = SelectObject(hdc_mem, hbitmap.into());
-        let blit_result = BitBlt(
-            hdc_mem,
-            0,
-            0,
-            width,
-            height,
-            Some(hdc_screen),
-            rect.left,
-            rect.top,
-            SRCCOPY,
-        );
+        let draw_result = draw(hdc_mem, hdc_screen);
 
         let mut buffer = vec![0u8; width as usize * height as usize * 4];
         let mut bmi = BITMAPINFO::default();
@@ -474,7 +501,7 @@ unsafe fn capture_rect_gdi(rect: RECT, width: i32, height: i32) -> Result<Vec<u8
         bmi.bmiHeader.biBitCount = 32;
         bmi.bmiHeader.biCompression = BI_RGB.0;
 
-        let lines_copied = if blit_result.is_ok() {
+        let lines_copied = if draw_result.is_ok() {
             GetDIBits(
                 hdc_mem,
                 hbitmap,
@@ -493,9 +520,7 @@ unsafe fn capture_rect_gdi(rect: RECT, width: i32, height: i32) -> Result<Vec<u8
         let _ = DeleteDC(hdc_mem);
         ReleaseDC(None, hdc_screen);
 
-        if let Err(e) = blit_result {
-            return Err(format!("BitBlt failed: {e}"));
-        }
+        draw_result?;
         if lines_copied == 0 {
             return Err("GetDIBits failed to read captured pixels".to_string());
         }
@@ -507,6 +532,105 @@ unsafe fn capture_rect_gdi(rect: RECT, width: i32, height: i32) -> Result<Vec<u8
             pixel[3] = 255;
         }
         Ok(buffer)
+    }
+}
+
+/// `PrintWindow` flag that has DWM render the window's full content, including
+/// DirectComposition surfaces (Chromium, WinUI) that a plain `WM_PRINT` leaves
+/// black. Missing from the `windows` crate's metadata.
+const PW_RENDERFULLCONTENT: PRINT_WINDOW_FLAGS = PRINT_WINDOW_FLAGS(2);
+
+/// Which path produced a window capture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowCapture {
+    /// The window rendered itself; windows in front of it do not show.
+    PrintWindow,
+    /// The window's region of the screen, taken with this backend; anything
+    /// in front of the window shows in the image.
+    ScreenRegion(Backend),
+}
+
+/// Captures one top-level window and returns it with its visible bounds in
+/// virtual desktop coordinates.
+///
+/// `PrintWindow` asks the window to render itself, so the capture shows the
+/// window even while other windows cover it. A few GPU-rendered applications
+/// hand back nothing that way; for those, the window's region of the screen
+/// is captured instead, provided the window is on the current desktop.
+pub fn capture_window(handle: isize) -> Result<(image::RgbaImage, RECT, WindowCapture), String> {
+    let hwnd = HWND(handle as *mut c_void);
+    unsafe {
+        if IsIconic(hwnd).as_bool() {
+            return Err("The window is minimized; restore it before capturing".to_string());
+        }
+        let mut window_rect = RECT::default();
+        GetWindowRect(hwnd, &mut window_rect).map_err(|e| format!("GetWindowRect failed: {e}"))?;
+        // Since Windows 10 the window rectangle includes invisible resize
+        // borders. The extended frame bounds are what is actually drawn.
+        let mut bounds = RECT::default();
+        if DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_EXTENDED_FRAME_BOUNDS,
+            &mut bounds as *mut RECT as *mut c_void,
+            size_of::<RECT>() as u32,
+        )
+        .is_err()
+        {
+            bounds = window_rect;
+        }
+        let width = bounds.right - bounds.left;
+        let height = bounds.bottom - bounds.top;
+        if width <= 0 || height <= 0 {
+            return Err(format!("The window has no visible area: {width}x{height}"));
+        }
+
+        let full_width = window_rect.right - window_rect.left;
+        let full_height = window_rect.bottom - window_rect.top;
+        let printed = render_gdi(full_width, full_height, |hdc_mem, _| {
+            PrintWindow(hwnd, hdc_mem, PW_RENDERFULLCONTENT)
+                .ok()
+                .map_err(|e| format!("PrintWindow failed: {e}"))
+        })
+        .and_then(|pixels| {
+            let full = image::RgbaImage::from_raw(full_width as u32, full_height as u32, pixels)
+                .ok_or("Failed to build image buffer from captured pixels")?;
+            let mut image = image::RgbaImage::new(width as u32, height as u32);
+            copy_rgba_region(
+                &full,
+                &mut image,
+                (
+                    (bounds.left - window_rect.left) as u32,
+                    (bounds.top - window_rect.top) as u32,
+                ),
+                (0, 0),
+                (width as u32, height as u32),
+            );
+            Ok(image)
+        });
+        let print_error = match printed {
+            Ok(image) if !is_blank(&image) => {
+                return Ok((image, bounds, WindowCapture::PrintWindow));
+            }
+            Ok(_) => "PrintWindow returned a blank image".to_string(),
+            Err(error) => error,
+        };
+
+        // The screen only shows the window when it is on the current virtual
+        // desktop; a cloaked window's region belongs to whatever is there.
+        let mut cloaked = 0u32;
+        let _ = DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED,
+            &mut cloaked as *mut u32 as *mut c_void,
+            size_of::<u32>() as u32,
+        );
+        if cloaked != 0 {
+            return Err(format!(
+                "{print_error}, and the window is not on the current desktop"
+            ));
+        }
+        let (image, backend) = capture_rect_with_backend(bounds, Backend::Auto)?;
+        Ok((image, bounds, WindowCapture::ScreenRegion(backend)))
     }
 }
 
@@ -600,6 +724,16 @@ mod tests {
             "DXGI returned a blank frame: {:.1}% of pixels lit, mean channel sum {mean:.1}",
             lit_fraction * 100.0
         );
+    }
+
+    /// `auto` must not pay for Desktop Duplication on a desktop GDI can read.
+    #[test]
+    #[ignore = "requires an interactive Windows desktop"]
+    fn auto_uses_gdi_on_a_live_desktop() {
+        let (image, backend) =
+            capture_rect_with_backend(virtual_screen_rect(), Backend::Auto).unwrap();
+        assert_eq!(backend, Backend::Gdi);
+        assert!(!is_blank(&image));
     }
 
     /// The two backends look at the same desktop, so their captures must agree
