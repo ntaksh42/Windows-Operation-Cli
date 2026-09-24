@@ -38,7 +38,7 @@ impl Drop for ToolCall {
     }
 }
 
-fn tool_is_disabled(name: &str) -> bool {
+pub fn tool_is_disabled(name: &str) -> bool {
     std::env::var("WINDOWS_MCP_DISABLED_TOOLS")
         .ok()
         .is_some_and(|configured| {

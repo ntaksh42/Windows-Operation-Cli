@@ -9,10 +9,10 @@
 //! is where the resulting `interactive_nodes`/`scrollable_nodes` end up so
 //! Click/Type/Scroll/Move/MultiSelect/MultiEdit can resolve a `label`.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use image::ImageEncoder;
-use image::imageops::FilterType;
 use rmcp::schemars;
 use serde::Deserialize;
 use windows::Win32::Foundation::HWND;
@@ -45,6 +45,9 @@ pub enum SnapshotScope {
 struct ScanOptions {
     scope: SnapshotScope,
     window: Option<String>,
+    /// A window already known by handle, from a tool acting on it. Takes
+    /// precedence over `window` and `scope`.
+    handle: Option<isize>,
     timeout: Duration,
 }
 
@@ -70,6 +73,7 @@ impl ScanOptions {
         Ok(Self {
             scope,
             window,
+            handle: None,
             timeout: Duration::from_millis(timeout_ms),
         })
     }
@@ -158,6 +162,19 @@ fn select_scan_targets<'a>(
     foreground: Option<&window::WindowInfo>,
     windows: &'a [window::SnapshotWindow],
 ) -> Result<Vec<&'a window::SnapshotWindow>, String> {
+    if let Some(handle) = options.handle {
+        let target = windows
+            .iter()
+            .find(|candidate| candidate.handle == handle)
+            .ok_or_else(|| "The window is no longer open".to_string())?;
+        let mut application_windows = vec![target];
+        application_windows.extend(
+            windows.iter().filter(|candidate| {
+                candidate.handle != handle && same_application(target, candidate)
+            }),
+        );
+        return Ok(application_windows);
+    }
     if let Some(query) = options.window.as_deref() {
         let best = find_window(query, windows)?;
         // Scan the matched window plus everything belonging to the same
@@ -258,6 +275,9 @@ pub struct SnapshotResult {
     pub interactive_nodes: Vec<state::ElementNode>,
     pub scrollable_nodes: Vec<state::ElementNode>,
     pub informative_nodes: Vec<state::ElementNode>,
+    /// Non-empty `ValuePattern` values, as `(owner window, value)` in document
+    /// order: what input fields hold, for reporting what an action changed.
+    pub value_text: Vec<(isize, String)>,
     pub dom_found: bool,
     pub dom_scroll_percent: f64,
     pub focused_window_title: Option<String>,
@@ -270,6 +290,8 @@ impl SnapshotResult {
             generation: self.generation,
             interactive_nodes: self.interactive_nodes.clone(),
             scrollable_nodes: self.scrollable_nodes.clone(),
+            informative_nodes: self.informative_nodes.clone(),
+            value_text: self.value_text.clone(),
         }
     }
 }
@@ -279,8 +301,23 @@ impl SnapshotResult {
 /// On success, the accessibility-tree state is written to `state.rs` so
 /// subsequent Click/Type/Scroll/Move calls can resolve `label`s.
 pub fn snapshot(params: &SnapshotParams) -> Result<SnapshotOutput, String> {
-    let result = capture(params)
-        .map_err(|e| format!("Error capturing desktop state: {e}. Please try again."))?;
+    publish(capture(params))
+}
+
+/// A Snapshot of the application owning the top-level window `handle`, for a
+/// tool that already knows which window it brought up.
+pub(crate) fn snapshot_window(handle: isize) -> Result<SnapshotOutput, String> {
+    publish(capture_inner(
+        &SnapshotParams::default(),
+        true,
+        Some(handle),
+    ))
+}
+
+/// Publishes a capture's element ids as the current desktop state.
+fn publish(result: Result<SnapshotResult, String>) -> Result<SnapshotOutput, String> {
+    let result =
+        result.map_err(|e| format!("Error capturing desktop state: {e}. Please try again."))?;
     state::set_state(result.to_desktop_state());
     Ok(SnapshotOutput {
         text: result.text,
@@ -337,6 +374,144 @@ fn enumerate_scan_windows(foreground: Option<&window::WindowInfo>) -> Vec<window
     }
 }
 
+/// The UIA objects one thread walks windows with.
+struct Walker {
+    automation: IUIAutomation,
+    condition: IUIAutomationCondition,
+    cache_request: IUIAutomationCacheRequest,
+    /// The whole-subtree condition and cache request browser DOM capture
+    /// walks with, when `use_dom` asked for it.
+    dom: Option<(IUIAutomationCondition, IUIAutomationCacheRequest)>,
+}
+
+impl Walker {
+    fn new(use_dom: bool, collect_text: bool) -> Result<Self, String> {
+        let automation = uia::create_automation().map_err(|e| e.to_string())?;
+        let condition =
+            uia::build_condition(&automation, collect_text).map_err(|e| e.to_string())?;
+        let cache_request =
+            uia::build_cache_request(&automation, &condition).map_err(|e| e.to_string())?;
+        let dom = if use_dom {
+            let dom_condition = uia::build_dom_condition(&automation).map_err(|e| e.to_string())?;
+            let dom_cache_request =
+                uia::build_cache_request(&automation, &dom_condition).map_err(|e| e.to_string())?;
+            Some((dom_condition, dom_cache_request))
+        } else {
+            None
+        };
+        Ok(Self {
+            automation,
+            condition,
+            cache_request,
+            dom,
+        })
+    }
+
+    /// Walks the window `handle` — through the DOM condition when `browser`
+    /// and one was built — and says whether the walk finished past `deadline`.
+    fn walk(
+        &self,
+        (handle, browser): (isize, bool),
+        deadline: Instant,
+        max_retries: u32,
+    ) -> (WalkWindowResult, bool) {
+        let (condition, cache_request) = match &self.dom {
+            Some((condition, cache_request)) if browser => (condition, cache_request),
+            _ => (&self.condition, &self.cache_request),
+        };
+        let result = walk_window_with_retry(
+            &self.automation,
+            cache_request,
+            condition,
+            HWND(handle as *mut _),
+            deadline,
+            max_retries,
+        );
+        (result, Instant::now() > deadline)
+    }
+}
+
+/// Most threads a capture walks windows on.
+const MAX_WALK_THREADS: usize = 8;
+
+/// Walks every window in `ordered`, returning the results in the same order.
+///
+/// Each window's walk is one cross-process cache build answered by that
+/// window's own UI thread, so walking them one after another left every other
+/// provider idle: a foreground application's three windows took three
+/// providers' time back to back, and a `scope=all` sweep the sum of every
+/// window on the desktop. The windows are walked on several threads instead,
+/// each with its own UIA objects in its own apartment.
+fn walk_scan_targets(
+    ordered: &[&window::SnapshotWindow],
+    use_dom: bool,
+    collect_text: bool,
+    deadline: Instant,
+    max_retries: u32,
+) -> Result<Vec<(WalkWindowResult, bool)>, String> {
+    let threads = std::thread::available_parallelism()
+        .map_or(1, usize::from)
+        .clamp(1, MAX_WALK_THREADS)
+        .min(ordered.len());
+    let targets: Vec<(isize, bool)> = ordered
+        .iter()
+        .map(|win| (win.handle, win.is_browser()))
+        .collect();
+    if threads <= 1 {
+        uia::ensure_com_initialized()?;
+        let walker = Walker::new(use_dom, collect_text)?;
+        return Ok(targets
+            .into_iter()
+            .map(|target| walker.walk(target, deadline, max_retries))
+            .collect());
+    }
+
+    let next = AtomicUsize::new(0);
+    let results: Vec<Mutex<Option<(WalkWindowResult, bool)>>> =
+        targets.iter().map(|_| Mutex::new(None)).collect();
+    let errors: Vec<String> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..threads)
+            .map(|_| {
+                scope.spawn(|| -> Result<(), String> {
+                    let _com = uia::ComApartment::enter()?;
+                    let walker = Walker::new(use_dom, collect_text)?;
+                    loop {
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(&target) = targets.get(index) else {
+                            return Ok(());
+                        };
+                        let walked = walker.walk(target, deadline, max_retries);
+                        *results[index]
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner) = Some(walked);
+                    }
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .filter_map(|worker| match worker.join() {
+                Ok(Ok(())) => None,
+                Ok(Err(error)) => Some(error),
+                Err(_) => Some("a window walk panicked".to_string()),
+            })
+            .collect()
+    });
+    // A worker that could not set up UIA leaves its windows to the others; only
+    // a capture where no worker could is an error.
+    if errors.len() == threads {
+        return Err(errors.into_iter().next().unwrap_or_default());
+    }
+    Ok(results
+        .into_iter()
+        .map(|slot| {
+            slot.into_inner()
+                .unwrap_or_else(PoisonError::into_inner)
+                .unwrap_or((WalkWindowResult::Failed, false))
+        })
+        .collect())
+}
+
 fn bounded_retry_delay(now: Instant, deadline: Instant, requested: Duration) -> Option<Duration> {
     deadline
         .checked_duration_since(now)
@@ -349,7 +524,6 @@ fn walk_window_with_retry(
     cache_request: &IUIAutomationCacheRequest,
     condition: &IUIAutomationCondition,
     hwnd: HWND,
-    reverse_children: bool,
     deadline: Instant,
     max_retries: u32,
 ) -> WalkWindowResult {
@@ -362,7 +536,7 @@ fn walk_window_with_retry(
         // timeout to overrun `timeout_ms`.
         let timeout_ms = remaining.as_millis().clamp(1, u32::MAX as u128) as u32;
         let _ = uia::set_transaction_timeout(automation, timeout_ms);
-        match uia::walk_window(automation, cache_request, condition, hwnd, reverse_children) {
+        match uia::walk_window(automation, cache_request, condition, hwnd) {
             Ok(result) => return WalkWindowResult::Success(result),
             Err(_) if attempt < max_retries => {
                 let Some(delay) = bounded_retry_delay(
@@ -858,20 +1032,31 @@ fn draw_annotations(
 /// assembles the response text. Returns a caller-facing error message (not
 /// yet wrapped with "Error capturing desktop state: ...").
 pub fn capture(params: &SnapshotParams) -> Result<SnapshotResult, String> {
-    capture_inner(params, true)
+    capture_inner(params, true, None)
 }
 
 /// A capture for a caller that reads the element lists rather than the
 /// rendered response — `WaitFor`, polling several times a second. Skips the
 /// table, tree and desktop-listing formatting, which that caller discards.
 pub fn capture_for_polling(params: &SnapshotParams) -> Result<SnapshotResult, String> {
-    capture_inner(params, false)
+    capture_inner(params, false, None)
 }
 
-fn capture_inner(params: &SnapshotParams, needs_text: bool) -> Result<SnapshotResult, String> {
+/// A polling capture of the application owning the top-level window `handle`,
+/// for a tool reading back the effect of acting on it.
+pub(crate) fn capture_window_for_polling(handle: isize) -> Result<SnapshotResult, String> {
+    capture_inner(&SnapshotParams::default(), false, Some(handle))
+}
+
+fn capture_inner(
+    params: &SnapshotParams,
+    needs_text: bool,
+    handle: Option<isize>,
+) -> Result<SnapshotResult, String> {
     let generation = state::next_generation();
-    let scan_options =
+    let mut scan_options =
         ScanOptions::resolve(params.scope, params.window.clone(), params.timeout_ms)?;
+    scan_options.handle = handle;
     let use_vision = opt_bool(&params.use_vision, false)?;
     let use_dom = opt_bool(&params.use_dom, false)?;
     let use_annotation = opt_bool(&params.use_annotation, true)?;
@@ -918,6 +1103,7 @@ fn capture_inner(params: &SnapshotParams, needs_text: bool) -> Result<SnapshotRe
     let mut interactive_nodes: Vec<state::ElementNode> = Vec::new();
     let mut scrollable_nodes: Vec<state::ElementNode> = Vec::new();
     let mut informative_nodes: Vec<state::ElementNode> = Vec::new();
+    let mut value_text: Vec<(isize, String)> = Vec::new();
     let mut dom_found = false;
     let mut dom_scroll_percent = 0.0;
     let mut window_trees: Vec<WindowTree> = Vec::new();
@@ -930,25 +1116,10 @@ fn capture_inner(params: &SnapshotParams, needs_text: bool) -> Result<SnapshotRe
     let mut blocked_windows: Vec<String> = Vec::new();
 
     if use_ui_tree && !walk_windows.is_empty() {
-        uia::ensure_com_initialized()?;
-        let automation = uia::create_automation().map_err(|e| e.to_string())?;
         // A whole-desktop sweep is a "which window do I want" question, and
         // collecting every window's text for it nearly doubles the scan. The
         // foreground capture that follows picks the text up.
         let collect_text = scan_options.scope != SnapshotScope::All;
-        let condition =
-            uia::build_condition(&automation, collect_text).map_err(|e| e.to_string())?;
-        let cache_request =
-            uia::build_cache_request(&automation, &condition).map_err(|e| e.to_string())?;
-        let dom_resources = if use_dom {
-            let dom_condition = uia::build_dom_condition(&automation).map_err(|e| e.to_string())?;
-            let dom_cache_request =
-                uia::build_cache_request(&automation, &dom_condition).map_err(|e| e.to_string())?;
-            Some((dom_condition, dom_cache_request))
-        } else {
-            None
-        };
-
         let ordered = select_scan_targets(&scan_options, foreground.as_ref(), &walk_windows)?;
 
         let deadline = Instant::now() + scan_options.timeout;
@@ -957,34 +1128,10 @@ fn capture_inner(params: &SnapshotParams, needs_text: bool) -> Result<SnapshotRe
         } else {
             3
         };
-        for win in ordered {
+        let walks = walk_scan_targets(&ordered, use_dom, collect_text, deadline, max_retries)?;
+        for (win, (walk, finished_late)) in ordered.into_iter().zip(walks) {
             let hwnd = HWND(win.handle as *mut _);
-            let browser_dom = use_dom && win.is_browser();
-            let window_condition = if browser_dom {
-                &dom_resources
-                    .as_ref()
-                    .expect("DOM resources are initialized when use_dom=true")
-                    .0
-            } else {
-                &condition
-            };
-            let window_cache_request = if browser_dom {
-                &dom_resources
-                    .as_ref()
-                    .expect("DOM resources are initialized when use_dom=true")
-                    .1
-            } else {
-                &cache_request
-            };
-            let (root_raw, elements) = match walk_window_with_retry(
-                &automation,
-                window_cache_request,
-                window_condition,
-                hwnd,
-                !browser_dom,
-                deadline,
-                max_retries,
-            ) {
+            let (root_raw, elements) = match walk {
                 WalkWindowResult::Success(result) => result,
                 WalkWindowResult::Failed => continue,
                 WalkWindowResult::DeadlineExceeded => {
@@ -998,7 +1145,7 @@ fn capture_inner(params: &SnapshotParams, needs_text: bool) -> Result<SnapshotRe
             // 2s default for `msinfo32`. Interrupting the walk would hand back
             // a half-built tree that looks whole, so the scan is left to
             // finish and the overrun is reported instead.
-            if Instant::now() > deadline {
+            if finished_late {
                 overran_budget = true;
             }
 
@@ -1048,6 +1195,7 @@ fn capture_inner(params: &SnapshotParams, needs_text: bool) -> Result<SnapshotRe
             let mut local_interactive: Vec<state::ElementNode> = Vec::new();
             let mut local_scrollable: Vec<state::ElementNode> = Vec::new();
             let mut local_informative: Vec<state::ElementNode> = Vec::new();
+            let mut local_values: Vec<(isize, String)> = Vec::new();
 
             // A provider can report bounds that extend past its own window
             // (stale layout, or a control scrolled out of view). Clipping each
@@ -1131,8 +1279,12 @@ fn capture_inner(params: &SnapshotParams, needs_text: bool) -> Result<SnapshotRe
                         local_interactive.clear();
                         local_scrollable.clear();
                         local_informative.clear();
+                        local_values.clear();
                     }
                     continue;
+                }
+                if !el.is_offscreen && !el.value.trim().is_empty() {
+                    local_values.push((win.handle, el.value.clone()));
                 }
                 let Some(node) = raw_to_node(
                     &el,
@@ -1251,6 +1403,7 @@ fn capture_inner(params: &SnapshotParams, needs_text: bool) -> Result<SnapshotRe
             interactive_nodes.extend(local_interactive);
             scrollable_nodes.extend(local_scrollable);
             informative_nodes.extend(local_informative);
+            value_text.extend(local_values);
             window_element_base += element_count;
         }
     }
@@ -1293,7 +1446,7 @@ fn capture_inner(params: &SnapshotParams, needs_text: bool) -> Result<SnapshotRe
 
         let mut image = if scale != 1.0 {
             let (w, h) = screenshot::scaled_size(orig_width, orig_height, scale);
-            image::imageops::resize(&captured, w.max(1), h.max(1), FilterType::Lanczos3)
+            screenshot::resize_lanczos3(&captured, w.max(1), h.max(1))?
         } else {
             captured
         };
@@ -1312,16 +1465,7 @@ fn capture_inner(params: &SnapshotParams, needs_text: bool) -> Result<SnapshotRe
             screenshot::draw_grid_lines(&mut image, w, h);
         }
 
-        let mut bytes = Vec::new();
-        image::codecs::png::PngEncoder::new(&mut bytes)
-            .write_image(
-                image.as_raw(),
-                image.width(),
-                image.height(),
-                image::ExtendedColorType::Rgba8,
-            )
-            .map_err(|e| format!("PNG encoding failed: {e}"))?;
-        png_bytes = Some(bytes);
+        png_bytes = Some(screenshot::encode_png(&image)?);
 
         screenshot_size_line = Some(if scale < 1.0 {
             let coord_scale = (1.0 / scale * 1_000_000.0).round() / 1_000_000.0;
@@ -1361,6 +1505,7 @@ fn capture_inner(params: &SnapshotParams, needs_text: bool) -> Result<SnapshotRe
             interactive_nodes,
             scrollable_nodes,
             informative_nodes,
+            value_text,
             dom_found,
             dom_scroll_percent,
             focused_window_title: foreground.as_ref().map(|w| w.title.clone()),
@@ -1491,6 +1636,7 @@ UI Tree Scan: completed in longer than timeout_ms={} — one window's           
         interactive_nodes,
         scrollable_nodes,
         informative_nodes,
+        value_text,
         dom_found,
         dom_scroll_percent,
         focused_window_title,
@@ -1938,6 +2084,7 @@ mod tests {
             is_modal: false,
             is_scrollable: false,
             vertical_scroll_percent: 0.0,
+            value: String::new(),
             clickable_point: clickable,
         }
     }

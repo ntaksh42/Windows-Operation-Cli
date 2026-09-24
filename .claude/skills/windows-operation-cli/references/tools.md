@@ -82,10 +82,12 @@ Errors (not empty results) when the focused element does not support TextPattern
 
 | param | type | default | notes |
 |---|---|---|---|
-| element_id | uint64 | required | from the most recent Snapshot only |
+| element_id | uint64? | null | from the most recent Snapshot only; one of element_id/element_ids required |
+| element_ids | [uint64]? | null | several ids invoked in order, after element_id; stops at the first failure and reports what ran |
 | fallback_to_click | bool | false | allow validated coordinate click when no semantic action exists |
+| report_text | bool | true | append the text (element names and input-field values) the element's window now shows that it did not show at the last Snapshot |
 
-Re-resolves the element by RuntimeId within its owning window and executes the first available UIA pattern: Invoke → SelectionItem.Select → Toggle → ExpandCollapse. Errors on stale ids, closed windows, or ambiguous matches.
+Re-resolves each element by RuntimeId within its owning window and executes the first available UIA pattern: Invoke → SelectionItem.Select → Toggle → ExpandCollapse. Errors on stale ids, closed windows, or ambiguous matches. With `report_text`, the response ends with `Window text now showing: "72", ...` (up to 15 entries, polled for up to 0.4 s) or `Window text: no change since the last Snapshot.` — enough to verify a result without another Snapshot. Element ids stay valid afterwards.
 
 ### Click
 
@@ -189,6 +191,7 @@ Polls without screenshots; returns as soon as the condition holds. Timeout retur
 | cwd | string? | | launch_executable only; must be an existing dir |
 | window_loc | [x,y]? | | resize |
 | window_size | [w,h]? | | resize |
+| snapshot | bool | false | launch/resize/switch: append a foreground Snapshot (with element ids) to the response |
 
 Mixing parameters across modes is an error. `launch` resolves the name via Start Menu apps and waits up to 10 s for the window. `launch_executable` returns JSON `{pid, executable, args, cwd}`.
 

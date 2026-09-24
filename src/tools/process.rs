@@ -1,8 +1,11 @@
 //! `Process` tool: list and kill running processes (docs/SPEC.md §19).
 
+use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, Instant};
+
 use rmcp::schemars;
 use serde::Deserialize;
-use sysinfo::{Pid, ProcessesToUpdate, System};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
 
 use crate::fuzzy;
 use crate::params::{self, BoolOrString};
@@ -75,12 +78,39 @@ struct Row {
     mem_mb: f64,
 }
 
+/// The process table from the previous listing and when it was taken.
+///
+/// `Process::cpu_usage()` needs two refreshes at least
+/// `MINIMUM_CPU_UPDATE_INTERVAL` apart, which made every listing sleep 200ms.
+/// Keeping the table lets a listing that follows a recent one measure CPU over
+/// the time in between instead.
+static PROCESS_SAMPLE: Mutex<Option<(System, Instant)>> = Mutex::new(None);
+
+/// How old the previous sample may be and still open the CPU window; an older
+/// one would average usage over too long to say what is busy now.
+const CPU_WINDOW_MAX: Duration = Duration::from_secs(5);
+
+/// Only what the listing shows: `System::new_all()` also gathered disks,
+/// networks, users and every process's command line, ~35ms per call.
+fn listing_refresh_kind() -> ProcessRefreshKind {
+    ProcessRefreshKind::nothing().with_cpu().with_memory()
+}
+
 fn list_processes(name: Option<&str>, sort_by: SortBy, limit: i64) -> String {
-    // Two refreshes spanning sysinfo's minimum interval are required for
-    // `Process::cpu_usage()` to report a meaningful (non-zero) value.
-    let mut system = System::new_all();
-    std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
-    system.refresh_processes(ProcessesToUpdate::All, true);
+    let mut sample = PROCESS_SAMPLE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let recent = matches!(&*sample, Some((_, taken)) if taken.elapsed() <= CPU_WINDOW_MAX);
+    let (system, taken) = sample.get_or_insert_with(|| (System::new(), Instant::now()));
+    if !recent {
+        system.refresh_processes_specifics(ProcessesToUpdate::All, true, listing_refresh_kind());
+        *taken = Instant::now();
+    }
+    if let Some(wait) = sysinfo::MINIMUM_CPU_UPDATE_INTERVAL.checked_sub(taken.elapsed()) {
+        std::thread::sleep(wait);
+    }
+    system.refresh_processes_specifics(ProcessesToUpdate::All, true, listing_refresh_kind());
+    *taken = Instant::now();
 
     let mut rows: Vec<Row> = system
         .processes()
@@ -191,7 +221,9 @@ fn kill_process(name: Option<&str>, pid: Option<u32>, _force: bool) -> String {
         return "Error: Provide either pid or name parameter for kill mode.".to_string();
     }
 
-    let system = System::new_all();
+    let system = System::new_with_specifics(
+        RefreshKind::nothing().with_processes(ProcessRefreshKind::nothing()),
+    );
     let mut killed: Vec<String> = Vec::new();
 
     if let Some(pid) = pid {

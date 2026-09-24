@@ -40,7 +40,10 @@ fn should_paste(text: &str) -> bool {
 }
 
 const KEY_WAIT: Duration = Duration::from_millis(50);
-const TYPE_INTERVAL: Duration = Duration::from_millis(40);
+/// Gap between characters on the per-character route. `KEYEVENTF_UNICODE`
+/// events queue in order and nothing is lost by sending them close together;
+/// the old 40ms cost ~450ms on an 11-character string.
+const TYPE_INTERVAL: Duration = Duration::from_millis(5);
 const PASTE_SETTLE_WAIT: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Deserialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq)]

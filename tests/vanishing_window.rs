@@ -72,8 +72,9 @@ fn invoking_into_a_closed_window_is_refused() {
     assert!(wait_until_gone(handle), "the window did not close");
 
     let error = invoke_element(InvokeElementParams {
-        element_id: button.element_id,
+        element_id: Some(button.element_id),
         fallback_to_click: None,
+        ..Default::default()
     })
     .expect_err("invoking into a closed window should fail");
     assert!(
@@ -102,8 +103,9 @@ fn the_click_fallback_into_a_closed_window_is_refused() {
     assert!(wait_until_gone(handle), "the window did not close");
 
     let error = invoke_element(InvokeElementParams {
-        element_id: button.element_id,
+        element_id: Some(button.element_id),
         fallback_to_click: Some(BoolOrString::Bool(true)),
+        ..Default::default()
     })
     .expect_err("the fallback should not click into a closed window");
     assert!(

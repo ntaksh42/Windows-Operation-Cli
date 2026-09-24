@@ -438,26 +438,72 @@ pub fn switch_to(handle: isize) {
     }
 }
 
+/// The top-level window `handle` now belongs to — itself, unless it has been
+/// reparented since it was seen. A packaged app's `CoreWindow` is briefly
+/// top-level while the app starts, then moves inside its
+/// `ApplicationFrameWindow`.
+pub fn root_window(handle: isize) -> isize {
+    let root = unsafe { GetAncestor(HWND(handle as *mut _), GA_ROOT) };
+    if root.0.is_null() {
+        handle
+    } else {
+        root.0 as isize
+    }
+}
+
+/// How long a launch waits for a window it did not see before settling for
+/// one that was already open — the app may be single-instance and have
+/// activated its existing window instead of opening another.
+const EXISTING_WINDOW_GRACE: Duration = Duration::from_millis(1500);
+
 /// Waits up to `timeout` for a window belonging to `pid` (if given) or whose
-/// title contains `name` (case-insensitive) to appear.
-pub fn wait_for_window(pid: Option<u32>, name: &str, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
+/// title contains `name` (case-insensitive) to appear, and returns its handle.
+///
+/// Windows listed in `existing` were open before the launch, so a title that
+/// merely mentions the app — a terminal tab reading "calculate 8*9 in
+/// Calculator" — would otherwise be taken for it the moment the wait began.
+/// They only count once the grace period has passed with nothing new.
+pub fn wait_for_window(
+    pid: Option<u32>,
+    name: &str,
+    timeout: Duration,
+    existing: &[isize],
+) -> Option<isize> {
+    let start = Instant::now();
     let name_lower = name.to_lowercase();
     loop {
         let windows = list_windows();
-        if pid.is_some_and(|pid| windows.iter().any(|w| w.pid == pid)) {
-            return true;
-        }
-        if windows
+        let matches = |window: &&WindowInfo| {
+            pid == Some(window.pid) || window.title.to_lowercase().contains(&name_lower)
+        };
+        // The title that is exactly the app's name beats one that mentions it.
+        let best = |candidates: Vec<&WindowInfo>| {
+            candidates
+                .iter()
+                .find(|w| w.title.to_lowercase() == name_lower || pid == Some(w.pid))
+                .or(candidates.first())
+                .map(|w| w.handle)
+        };
+        let new: Vec<&WindowInfo> = windows
             .iter()
-            .any(|w| w.title.to_lowercase().contains(&name_lower))
-        {
-            return true;
+            .filter(|w| !existing.contains(&w.handle))
+            .filter(matches)
+            .collect();
+        if let Some(handle) = best(new) {
+            return Some(handle);
         }
-        if Instant::now() >= deadline {
-            return false;
+        if start.elapsed() >= EXISTING_WINDOW_GRACE {
+            let old: Vec<&WindowInfo> = windows.iter().filter(matches).collect();
+            if let Some(handle) = best(old) {
+                return Some(handle);
+            }
         }
-        std::thread::sleep(Duration::from_millis(200));
+        if start.elapsed() >= timeout {
+            return None;
+        }
+        // Enumeration costs about a millisecond; a coarse poll only delayed
+        // the response past the moment the window appeared.
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 

@@ -104,8 +104,9 @@ fn a_capture_then_act_loop_holds_together() {
     let nodes = look(&app);
     app.drain_events();
     invoke_element(InvokeElementParams {
-        element_id: find(&nodes, BUTTON_TEXT).element_id,
+        element_id: Some(find(&nodes, BUTTON_TEXT).element_id),
         fallback_to_click: None,
+        ..Default::default()
     })
     .expect("invoke failed");
     assert_eq!(
@@ -132,8 +133,9 @@ fn several_actions_run_off_one_capture() {
 
     app.drain_events();
     invoke_element(InvokeElementParams {
-        element_id: checkbox,
+        element_id: Some(checkbox),
         fallback_to_click: None,
+        ..Default::default()
     })
     .expect("toggling the checkbox failed");
     assert!(
@@ -142,8 +144,9 @@ fn several_actions_run_off_one_capture() {
     );
 
     invoke_element(InvokeElementParams {
-        element_id: item,
+        element_id: Some(item),
         fallback_to_click: None,
+        ..Default::default()
     })
     .expect("selecting the list item failed");
     assert!(
@@ -154,8 +157,9 @@ fn several_actions_run_off_one_capture() {
 
     app.drain_events();
     invoke_element(InvokeElementParams {
-        element_id: button,
+        element_id: Some(button),
         fallback_to_click: None,
+        ..Default::default()
     })
     .expect("pressing the button failed");
     assert_eq!(
@@ -182,8 +186,9 @@ fn ids_from_a_superseded_capture_are_refused() {
     let _second = look(&app);
 
     let error = invoke_element(InvokeElementParams {
-        element_id: stale,
+        element_id: Some(stale),
         fallback_to_click: None,
+        ..Default::default()
     })
     .expect_err("an id from a superseded capture should be refused");
     assert!(
@@ -259,8 +264,9 @@ fn coordinate_and_id_calls_mix() {
 
     app.drain_events();
     invoke_element(InvokeElementParams {
-        element_id: button,
+        element_id: Some(button),
         fallback_to_click: None,
+        ..Default::default()
     })
     .expect("invoke failed");
     assert_eq!(

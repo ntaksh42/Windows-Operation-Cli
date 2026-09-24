@@ -11,8 +11,9 @@
 //! and tool-window styled, so it takes no focus, swallows no clicks, and does
 //! not appear in the taskbar or in window enumeration for UIA scans.
 
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
-use std::sync::mpsc::{Sender, sync_channel};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::sync_channel;
 use std::thread;
 
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -21,12 +22,12 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, GetSystemMetrics,
-    HWND_TOPMOST, LWA_COLORKEY, MSG, PostMessageW, RegisterClassExW, SM_CXVIRTUALSCREEN,
-    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_SHOWNA, SWP_NOACTIVATE,
-    SetLayeredWindowAttributes, SetWindowDisplayAffinity, SetWindowPos, ShowWindow, TranslateMessage,
-    WDA_EXCLUDEFROMCAPTURE, WM_APP, WM_PAINT, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
+    GetSystemMetrics, HWND_TOPMOST, LWA_COLORKEY, MSG, RegisterClassExW, SM_CXVIRTUALSCREEN,
+    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE, SWP_NOACTIVATE,
+    SWP_SHOWWINDOW, SetLayeredWindowAttributes, SetWindowDisplayAffinity, SetWindowPos, ShowWindow,
+    TranslateMessage, WDA_EXCLUDEFROMCAPTURE, WM_PAINT, WNDCLASSEXW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
@@ -36,12 +37,11 @@ const BORDER_PX: i32 = 4;
 const BORDER_COLOR: u32 = 0x0000_30E8;
 /// The color key painted as "transparent"; must differ from BORDER_COLOR.
 const TRANSPARENT_KEY: u32 = 0x0000_0000;
-/// Private message asking the overlay thread to tear the window down.
-const WM_OVERLAY_CLOSE: u32 = WM_APP + 1;
-
-/// Handle of the live overlay window, or 0. Written only by the overlay thread.
-static OVERLAY_HWND: AtomicIsize = AtomicIsize::new(0);
-/// Whether an overlay thread is currently running.
+/// The overlay window, created once on its own message-pump thread and then
+/// only shown and hidden; `None` when it could not be created. Building a
+/// full-screen layered window per action cost 11-35ms on every input tool call.
+static OVERLAY_WINDOW: OnceLock<Option<isize>> = OnceLock::new();
+/// Whether a guard currently owns the border.
 static OVERLAY_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// True unless the operator disabled the overlay via the environment.
@@ -81,23 +81,12 @@ unsafe extern "system" fn wnd_proc(
             }
             LRESULT(0)
         }
-        WM_OVERLAY_CLOSE => {
-            unsafe {
-                let _ = DestroyWindow(hwnd);
-            }
-            LRESULT(0)
-        }
-        windows::Win32::UI::WindowsAndMessaging::WM_DESTROY => {
-            unsafe {
-                windows::Win32::UI::WindowsAndMessaging::PostQuitMessage(0);
-            }
-            LRESULT(0)
-        }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
 }
 
-/// Creates the borderless topmost window spanning the whole virtual desktop.
+/// Creates the borderless topmost window, hidden until [`InputOverlay::show`]
+/// sizes it to the virtual desktop.
 ///
 /// Returns the handle on success. Every failure is reported to the caller so
 /// the guard can degrade to "no overlay" rather than failing the input action.
@@ -117,20 +106,15 @@ unsafe fn create_overlay() -> Result<HWND, String> {
         };
         RegisterClassExW(&wc);
 
-        let x = GetSystemMetrics(SM_XVIRTUALSCREEN);
-        let y = GetSystemMetrics(SM_YVIRTUALSCREEN);
-        let cx = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-        let cy = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-
         let hwnd = CreateWindowExW(
             WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
             class_name,
             w!(""),
             WS_POPUP,
-            x,
-            y,
-            cx,
-            cy,
+            0,
+            0,
+            0,
+            0,
             None,
             None,
             Some(instance.into()),
@@ -147,11 +131,35 @@ unsafe fn create_overlay() -> Result<HWND, String> {
 
         SetLayeredWindowAttributes(hwnd, COLORREF(TRANSPARENT_KEY), 0, LWA_COLORKEY)
             .map_err(|e| format!("SetLayeredWindowAttributes failed: {e}"))?;
-
-        let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, cx, cy, SWP_NOACTIVATE);
-        let _ = ShowWindow(hwnd, SW_SHOWNA);
         Ok(hwnd)
     }
+}
+
+/// The overlay window, creating it (and the thread that pumps its messages)
+/// on first use.
+fn overlay_window() -> Option<HWND> {
+    let handle = *OVERLAY_WINDOW.get_or_init(|| {
+        let (ready_tx, ready_rx) = sync_channel::<Option<isize>>(0);
+        thread::spawn(move || {
+            let hwnd = match unsafe { create_overlay() } {
+                Ok(hwnd) => hwnd,
+                Err(_) => {
+                    let _ = ready_tx.send(None);
+                    return;
+                }
+            };
+            let _ = ready_tx.send(Some(hwnd.0 as isize));
+            let mut msg = MSG::default();
+            unsafe {
+                while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                    let _ = TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+            }
+        });
+        ready_rx.recv().ok().flatten()
+    });
+    handle.map(|handle| HWND(handle as *mut _))
 }
 
 /// Shows the border for as long as the guard is alive.
@@ -160,7 +168,7 @@ unsafe fn create_overlay() -> Result<HWND, String> {
 /// blocking input sequence never stalls repaints, and the border disappears on
 /// every return path including an early `?`.
 pub struct InputOverlay {
-    closer: Option<Sender<()>>,
+    window: Option<isize>,
 }
 
 impl InputOverlay {
@@ -170,64 +178,40 @@ impl InputOverlay {
         if !overlay_enabled() || OVERLAY_ACTIVE.swap(true, Ordering::SeqCst) {
             // Disabled, or an outer guard already owns the border: nest as a
             // no-op so the inner guard's Drop does not tear down the outer one.
-            return Self { closer: None };
+            return Self { window: None };
         }
-
-        let (ready_tx, ready_rx) = sync_channel::<bool>(0);
-        let (close_tx, close_rx) = std::sync::mpsc::channel::<()>();
-
-        thread::spawn(move || {
-            let hwnd = match unsafe { create_overlay() } {
-                Ok(hwnd) => hwnd,
-                Err(_) => {
-                    let _ = ready_tx.send(false);
-                    OVERLAY_ACTIVE.store(false, Ordering::SeqCst);
-                    return;
-                }
-            };
-            OVERLAY_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
-            let _ = ready_tx.send(true);
-
-            // Close requests arrive from the guard's Drop on another thread;
-            // post them into this thread's queue so the window is destroyed by
-            // the thread that owns it, as Win32 requires.
-            let closer_hwnd = hwnd.0 as isize;
-            thread::spawn(move || {
-                let _ = close_rx.recv();
-                unsafe {
-                    let _ = PostMessageW(
-                        Some(HWND(closer_hwnd as *mut _)),
-                        WM_OVERLAY_CLOSE,
-                        WPARAM(0),
-                        LPARAM(0),
-                    );
-                }
-            });
-
-            let mut msg = MSG::default();
-            unsafe {
-                while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-                    let _ = TranslateMessage(&msg);
-                    DispatchMessageW(&msg);
-                }
-            }
-            OVERLAY_HWND.store(0, Ordering::SeqCst);
+        let Some(hwnd) = overlay_window() else {
             OVERLAY_ACTIVE.store(false, Ordering::SeqCst);
-        });
-
-        // Wait for the window to exist before returning, so the border is up
-        // before the first click lands rather than racing it.
-        match ready_rx.recv() {
-            Ok(true) => Self { closer: Some(close_tx) },
-            _ => Self { closer: None },
+            return Self { window: None };
+        };
+        // Sized on every show so a display change since the window was created
+        // is still covered. `SetWindowPos` on another thread's window is a sent
+        // message, so the border is up before the first click lands rather
+        // than racing it.
+        unsafe {
+            let _ = SetWindowPos(
+                hwnd,
+                Some(HWND_TOPMOST),
+                GetSystemMetrics(SM_XVIRTUALSCREEN),
+                GetSystemMetrics(SM_YVIRTUALSCREEN),
+                GetSystemMetrics(SM_CXVIRTUALSCREEN),
+                GetSystemMetrics(SM_CYVIRTUALSCREEN),
+                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
+        }
+        Self {
+            window: Some(hwnd.0 as isize),
         }
     }
 }
 
 impl Drop for InputOverlay {
     fn drop(&mut self) {
-        if let Some(closer) = self.closer.take() {
-            let _ = closer.send(());
+        if let Some(handle) = self.window.take() {
+            unsafe {
+                let _ = ShowWindow(HWND(handle as *mut _), SW_HIDE);
+            }
+            OVERLAY_ACTIVE.store(false, Ordering::SeqCst);
         }
     }
 }
@@ -255,7 +239,7 @@ mod tests {
         // otherwise a Type (which clicks, then types) would flash the border.
         OVERLAY_ACTIVE.store(true, Ordering::SeqCst);
         let inner = InputOverlay::show();
-        assert!(inner.closer.is_none());
+        assert!(inner.window.is_none());
         drop(inner);
         assert!(OVERLAY_ACTIVE.load(Ordering::SeqCst));
         OVERLAY_ACTIVE.store(false, Ordering::SeqCst);

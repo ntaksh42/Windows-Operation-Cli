@@ -7,7 +7,8 @@ use rmcp::schemars;
 use serde::Deserialize;
 
 use crate::apps::{self, title_case};
-use crate::params::ListOrString;
+use crate::params::{BoolOrString, ListOrString, opt_bool};
+use crate::tools::snapshot::SnapshotParams;
 use crate::window;
 
 /// `App` tool modes.
@@ -42,6 +43,10 @@ pub struct AppParams {
     pub args: Option<ListOrString<String>>,
     /// Working directory, `launch_executable` mode only.
     pub cwd: Option<String>,
+    /// Append a Snapshot of the foreground window (element ids included) to
+    /// the response, so the caller can act without a separate Snapshot call.
+    /// Not supported for `launch_executable`. Defaults to false.
+    pub snapshot: Option<BoolOrString>,
 }
 
 /// Dispatches to the mode-specific handler. `Err` results are structural/
@@ -57,7 +62,9 @@ pub fn app(params: AppParams) -> Result<String, String> {
         executable,
         args,
         cwd,
+        snapshot,
     } = params;
+    let snapshot = opt_bool(&snapshot, false)?;
 
     let window_loc = to_pair(window_loc, "window_loc")?;
     let window_size = to_pair(window_size, "window_size")?;
@@ -75,6 +82,9 @@ pub fn app(params: AppParams) -> Result<String, String> {
         let Some(executable) = executable else {
             return Err(r#"executable is required for mode="launch_executable""#.to_string());
         };
+        if snapshot {
+            return Err(r#"snapshot is not supported for mode="launch_executable""#.to_string());
+        }
         if name.is_some() || window_loc.is_some() || window_size.is_some() {
             return Err(
                 "name, window_loc, and window_size are not supported for mode=\"launch_executable\"".to_string(),
@@ -83,12 +93,58 @@ pub fn app(params: AppParams) -> Result<String, String> {
         return launch_executable(&executable, args.unwrap_or_default(), cwd.as_deref());
     }
 
-    Ok(match mode {
+    let (message, handle) = match mode {
         AppMode::Launch => launch(name.as_deref()),
         AppMode::Resize => resize(name.as_deref(), window_loc, window_size),
         AppMode::Switch => switch(name.as_deref()),
         AppMode::LaunchExecutable => unreachable!("handled above"),
-    })
+    };
+    if !snapshot {
+        return Ok(message);
+    }
+    // Capture the window this call acted on, not whatever is in front: a
+    // launcher, a toast or a focus-stealing popup can hold the foreground.
+    let captured = match handle {
+        Some(handle) => snapshot_when_populated(handle),
+        None => crate::tools::snapshot::snapshot(&SnapshotParams::default()),
+    };
+    let captured = match captured {
+        Ok(output) => output.text,
+        Err(error) => error,
+    };
+    Ok(format!("{message}\n\n{captured}"))
+}
+
+/// How long a just-launched window gets to put up its controls. A packaged
+/// app's frame appears well before its content does, and a Snapshot taken in
+/// between reports no elements at all.
+const CONTENT_TIMEOUT: Duration = Duration::from_secs(3);
+const CONTENT_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Snapshots `handle`'s application once its content has settled: it shows
+/// a control, and two captures in a row found the same number of elements.
+/// An app that restores a session fills in for a while after its first
+/// control appears, and a capture taken partway through would leave the rest
+/// to be reported as a change by the next action.
+fn snapshot_when_populated(
+    handle: isize,
+) -> Result<crate::tools::snapshot::SnapshotOutput, String> {
+    let deadline = std::time::Instant::now() + CONTENT_TIMEOUT;
+    let mut previous_count = None;
+    loop {
+        let output = crate::tools::snapshot::snapshot_window(handle);
+        let count = crate::state::current_state().map_or(0, |state| {
+            state.interactive_nodes.len()
+                + state.scrollable_nodes.len()
+                + state.informative_nodes.len()
+        });
+        let settled = count > 0 && previous_count == Some(count);
+        if settled || output.is_err() || std::time::Instant::now() >= deadline {
+            return output;
+        }
+        previous_count = Some(count);
+        std::thread::sleep(CONTENT_INTERVAL);
+    }
 }
 
 fn to_pair(value: Option<ListOrString<i32>>, field: &str) -> Result<Option<(i32, i32)>, String> {
@@ -105,67 +161,79 @@ fn to_pair(value: Option<ListOrString<i32>>, field: &str) -> Result<Option<(i32,
     }
 }
 
-fn launch(name: Option<&str>) -> String {
+/// The response text, and the window it concerns when there is one.
+type Outcome = (String, Option<isize>);
+
+fn launch(name: Option<&str>) -> Outcome {
     let Some(name) = name else {
-        return r#"name is required for mode="launch""#.to_string();
+        return (r#"name is required for mode="launch""#.to_string(), None);
     };
+    let existing: Vec<isize> = window::list_windows().iter().map(|w| w.handle).collect();
     let (response, status, pid, matched_name) = apps::launch_app(name);
     if status != 0 {
-        return response;
+        return (response, None);
     }
-    if window::wait_for_window(pid, &matched_name, Duration::from_secs(10)) {
-        format!("{} launched.", title_case(&matched_name))
-    } else {
-        format!(
-            "Launching {} sent, but window not detected yet.",
-            title_case(&matched_name)
-        )
+    match window::wait_for_window(pid, &matched_name, Duration::from_secs(10), &existing) {
+        Some(handle) => (
+            format!("{} launched.", title_case(&matched_name)),
+            Some(handle),
+        ),
+        None => (
+            format!(
+                "Launching {} sent, but window not detected yet.",
+                title_case(&matched_name)
+            ),
+            None,
+        ),
     }
 }
 
-fn resize(name: Option<&str>, loc: Option<(i32, i32)>, size: Option<(i32, i32)>) -> String {
+fn resize(name: Option<&str>, loc: Option<(i32, i32)>, size: Option<(i32, i32)>) -> Outcome {
     let target = match name {
         Some(name) => match window::find_by_name(name) {
             Some(w) => w,
-            None => return format!("Application {} not found.", title_case(name)),
+            None => return (format!("Application {} not found.", title_case(name)), None),
         },
         None => match window::foreground_window() {
             Some(w) => w,
-            None => return "No active window found".to_string(),
+            None => return ("No active window found".to_string(), None),
         },
     };
+    let handle = Some(target.handle);
 
     if window::is_minimized(target.handle) {
-        return format!("{} is minimized", target.title);
+        return (format!("{} is minimized", target.title), handle);
     }
     if window::is_maximized(target.handle) {
-        return format!("{} is maximized", target.title);
+        return (format!("{} is maximized", target.title), handle);
     }
 
-    match window::resize_window(target.handle, loc, size) {
+    let message = match window::resize_window(target.handle, loc, size) {
         Ok((x, y, w, h)) => format!("{} resized to {w}x{h} at {x},{y}.", target.title),
         Err(e) => format!("Failed to resize {}: {e}", target.title),
-    }
+    };
+    (message, handle)
 }
 
-fn switch(name: Option<&str>) -> String {
+fn switch(name: Option<&str>) -> Outcome {
     let Some(name) = name else {
-        return r#"name is required for mode="switch""#.to_string();
+        return (r#"name is required for mode="switch""#.to_string(), None);
     };
     let Some(target) = window::find_by_name(name) else {
-        return format!("Application {} not found.", title_case(name));
+        return (format!("Application {} not found.", title_case(name)), None);
     };
 
     let was_minimized = window::is_minimized(target.handle);
     window::switch_to(target.handle);
-    if was_minimized {
+    let message = if was_minimized {
         format!(
             "Restored {} from minimized and switched to it.",
             title_case(&target.title)
         )
     } else {
         format!("Switched to {} window.", title_case(&target.title))
-    }
+    };
+    (message, Some(target.handle))
 }
 
 fn launch_executable(
@@ -253,6 +321,7 @@ mod tests {
             executable: None,
             args: None,
             cwd: None,
+            snapshot: None,
         });
         assert!(result.unwrap_err().contains("require mode=\"resize\""));
     }

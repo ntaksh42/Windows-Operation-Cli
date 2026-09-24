@@ -63,6 +63,11 @@ pub struct DesktopState {
     pub generation: u32,
     pub interactive_nodes: Vec<ElementNode>,
     pub scrollable_nodes: Vec<ElementNode>,
+    /// Text the windows showed, so an action can report what changed. Never
+    /// addressed by label or id.
+    pub informative_nodes: Vec<ElementNode>,
+    /// `(owner window, value)` for fields holding a value, for the same report.
+    pub value_text: Vec<(isize, String)>,
 }
 
 static STATE: OnceLock<Mutex<Option<DesktopState>>> = OnceLock::new();
@@ -217,6 +222,7 @@ mod tests {
             generation: 0,
             interactive_nodes: vec![node(1, 1), node(2, 2)],
             scrollable_nodes: vec![node(3, 3)],
+            ..Default::default()
         });
         assert_eq!(resolve_label(0), Ok((1, 1)));
         assert_eq!(resolve_label(1), Ok((2, 2)));
@@ -232,6 +238,7 @@ mod tests {
             generation: 0,
             interactive_nodes: vec![node(1, 1)],
             scrollable_nodes: vec![node(2, 2)],
+            ..Default::default()
         });
         assert_eq!(resolve_labels(&[0, 1]), Ok(vec![(1, 1), (2, 2)]));
         assert_eq!(
@@ -264,6 +271,7 @@ mod tests {
             generation: first_generation,
             interactive_nodes: vec![first.clone()],
             scrollable_nodes: vec![],
+            ..Default::default()
         });
         assert_eq!(resolve_element(first.element_id).unwrap().center, (10, 20));
 
@@ -272,6 +280,7 @@ mod tests {
             generation: second_generation,
             interactive_nodes: vec![],
             scrollable_nodes: vec![],
+            ..Default::default()
         });
         assert_eq!(
             resolve_element(first.element_id).unwrap_err(),

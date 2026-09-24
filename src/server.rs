@@ -73,7 +73,7 @@ pub struct WindowsOperationCliServer;
 impl WindowsOperationCliServer {
     #[tool(
         name = "InvokeElement",
-        description = "Invokes a structured UI element id from the most recent Snapshot using UI Automation semantics. Set fallback_to_click=true to explicitly allow a validated coordinate click when no semantic action is available."
+        description = "Invokes UI element ids from the most recent Snapshot using UI Automation semantics. Pass element_ids to invoke several in order in one call (e.g. calculator buttons 8, multiply, 9, equals). The response reports the text the element's window now shows that it did not show at the last Snapshot (e.g. a calculator's result), so a follow-up Snapshot is only needed for new element ids; set report_text=false to skip that read. Set fallback_to_click=true to explicitly allow a validated coordinate click when no semantic action is available."
     )]
     async fn invoke_element(
         &self,
@@ -406,7 +406,7 @@ impl WindowsOperationCliServer {
 
     #[tool(
         name = "App",
-        description = "Open/start/launch applications and manage windows. Four modes: 'launch' (opens an application by Start Menu name), 'launch_executable' (launches one executable path with separated argv and optional cwd), 'resize' (adjusts a named or active window), and 'switch' (brings a specific window into focus)."
+        description = "Open/start/launch applications and manage windows. Four modes: 'launch' (opens an application by Start Menu name and waits for its window), 'launch_executable' (launches one executable path with separated argv and optional cwd), 'resize' (adjusts a named or active window), and 'switch' (brings a specific window into focus). Set snapshot=true (launch/switch/resize) to get the foreground window's Snapshot, element ids included, in the same response instead of calling Snapshot next."
     )]
     async fn app(
         &self,

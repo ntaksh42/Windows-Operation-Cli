@@ -24,10 +24,11 @@ modes: launch / launch_executable / resize / switch
 | executable | string? | null (launch_executable 必須。存在チェック、expanduser+resolve) |
 | args | [string]? | null (launch_executable のみ) |
 | cwd | string? | null (launch_executable のみ。存在する dir 必須) |
+| snapshot | bool | false (launch/resize/switch。対象ウィンドウの Snapshot を応答に追記し、要素 id を発行する) |
 
 - モード外パラメータ混在は ValueError。
 - launch_executable: `Popen([exe,*args], shell=False, stdio=null)` 相当 → JSON `{"pid","executable","args","cwd"}` を返す。
-- launch: Get-StartApps (PowerShell) で列挙 → fuzzy(70) → パスなら Start-Process、AppID なら `shell:AppsFolder\<AppID>`。起動後 PID→ウィンドウ出現を最大 10 秒待つ。応答: `"{Name} launched."` / `"Launching {Name} sent, but window not detected yet."` / `"{name} not found in start menu."`
+- launch: Get-StartApps (PowerShell) で列挙 → fuzzy(70) → パスなら Start-Process、AppID なら ShellExecute で `shell:AppsFolder\<AppID>`（失敗時は "Invalid app identifier"）。一覧はプロセス内にキャッシュし（サーバー起動時にバックグラウンドで取得、App 無効時は取得しない）、名前が見つからない時だけ取り直す。起動後 PID→ウィンドウ出現を最大 10 秒待つ。起動前から存在したウィンドウは、1.5 秒経っても新しいウィンドウが現れない場合のみ採用する。snapshot=true では要素数が 2 回続けて同じになるまで（最大 3 秒）撮り直す。応答: `"{Name} launched."` / `"Launching {Name} sent, but window not detected yet."` / `"{name} not found in start menu."`
 - resize: MoveWindow。minimized/maximized なら拒否文字列。応答 `"{name} resized to {w}x{h} at {x},{y}."`
 - switch: AttachThreadInput + SetForegroundWindow + BringWindowToTop + SetWindowPos。応答 `"Switched to {Name} window."` 等。
 
@@ -47,8 +48,9 @@ EnumDisplayMonitors + GetMonitorInfoExW + GetDpiForMonitor(Shcore)。index は A
 
 実装要点:
 - pwsh 優先、なければ powershell 5.1。
-- コマンドは UTF-8 出力設定プレフィックス付与 → UTF-16LE → base64 → `-NoProfile -EncodedCommand`（5.1 のみ `-OutputFormat Text` 追加）。
-- stdin は null（MCP stdio パイプ継承防止）。cwd はユーザーホーム固定。NO_COLOR=1。
+- シェルは UTF-8 出力設定プレフィックス付きのブートストラップを `-NoProfile -EncodedCommand`（UTF-16LE → base64、5.1 のみ `-OutputFormat Text` 追加）で起動し、コマンドは stdin から base64(UTF-8) で受け取って `-Command` 相当（script scope に dot-source、最終文失敗で exit 1、構文エラーは無出力で exit 1）で実行する。
+- 起動（~500ms）を呼び出しの外に出すため、各呼び出しの後に次回用のシェルを 1 つ事前起動しておく。コマンドごとに新しいプロセスである点は変わらない。起動時とシェル・環境変数が異なれば破棄して起動し直す。
+- stdin はコマンド送信後に閉じる（MCP stdio パイプは継承しない）。cwd はユーザーホーム固定。NO_COLOR=1。サーバーにコンソールが無い場合は CREATE_NO_WINDOW。
 - 環境変数修復: HKLM/HKCU の Environment から欠損分を補完（PATH は継承優先で追記・大小無視デデュープ、PATHEXT フォールバックあり）。
 - タイムアウト: CTRL_BREAK_EVENT → 2 秒猶予 → `taskkill /PID x /T /F` でツリーごと強制終了。応答 `("Command execution timed out", 1)`。
 - returncode≠0 かつ "Access is denied" かつ非管理者なら昇格ヒントを追記。
@@ -131,7 +133,7 @@ desktop
 - ブラウザ (chrome/msedge/firefox) + use_dom: Chromium は UIA の RootWebArea、Firefox は IA2 フォールバック。
 - モーダルダイアログ検出時はそのウィンドウの蓄積ノードをクリア。
 - ウィンドウ列挙: EnumWindows + Progman + Shell_TrayWnd、現仮想デスクトップのみ、オーバーレイ除外。
-- ネイティブアプリの子要素走査順は reversed(children)（ラベル番号の互換性に影響）。
+- 子要素の走査順は文書順（ラベル番号の順序に影響）。
 - エラー時: `"Error capturing desktop state: {e}. Please try again."`（文字列で返す）
 
 ## 7. Screenshot
@@ -153,14 +155,16 @@ loc/label どちらか必須。応答 `"{Hover|Single|Double} {button} clicked a
 
 ## 8.1 InvokeElement
 
-`element_id: uint64`（必須）、`fallback_to_click: bool=false`。最新 Snapshot の
+`element_id: uint64?`、`element_ids: [uint64]?`（少なくとも一方。複数は順に実行し、失敗時はそこで止めて実行済みを報告）、
+`fallback_to_click: bool=false`、`report_text: bool=true`（実行後、要素のウィンドウに最後の Snapshot 以降新たに現れた
+テキスト（要素名と ValuePattern の値。値は 200 文字まで）を最大 15 件、最大 0.4 秒ポーリングして報告。要素 id は無効化しない）。最新 Snapshot の
 構造化要素を所有ウィンドウ内で RuntimeId により一意に再解決し、Invoke、
 SelectionItem.Select、Toggle、ExpandCollapse の順で利用可能なUIAパターンを
 実行する。RuntimeId一致がない場合のみ、AutomationId、ControlType、boundsの
 全一致を再解決に使用する。古いID、閉じたウィンドウ、複数一致はエラー。
 座標クリックは明示指定時だけ許可し、保存された中心が現在の所有ウィンドウと
 要素bounds内にあることを検証する。
-Rust では SendInput（MOUSEEVENTF_ABSOLUTE は仮想スクリーン基準に正規化）。double click は GetDoubleClickTime()/2 の間隔。click 間 sleep 0.05s、操作後は既定 0.05s（`WINDOWS_MCP_INPUT_SETTLE_MS` で変更可能）。
+Rust では SendInput（MOUSEEVENTF_ABSOLUTE は仮想スクリーン基準に正規化）。double click は GetDoubleClickTime()/2 の間隔。click 間 sleep 0.05s、操作後は既定 0.02s（`WINDOWS_MCP_INPUT_SETTLE_MS` で変更可能）。
 
 ## 9. Type
 
@@ -241,7 +245,7 @@ param: duration: int 秒。sleep。応答 `"Waited for {duration} seconds."`
 ## 16. MultiSelect
 
 locs: [[x,y],...] / labels: [int,...]（併用可、少なくとも一方）、press_ctrl: bool=true。
-Ctrl 押しっぱなし → 各座標クリック（操作後は `WINDOWS_MCP_INPUT_SETTLE_MS`、既定 0.05s）→ Ctrl 解放（無条件）。
+Ctrl 押しっぱなし → 各座標クリック（操作後は `WINDOWS_MCP_INPUT_SETTLE_MS`、既定 0.02s）→ Ctrl 解放（無条件）。
 応答 `"Multi-selected elements at:\n(x,y)\n(x,y)..."`
 
 ## 17. MultiEdit
@@ -293,5 +297,6 @@ Rust では windows crate の WinRT (Windows.UI.Notifications) 直呼びで可�
 - `WINDOWS_MCP_PROFILE_SNAPSHOT=1` で window enumeration、UIA、image、total の
   各時間をstderrへ出力する。4K画像処理はrelease profileで測定・運用する。
 - UI操作後の同期には固定秒数のWaitよりWaitForを優先する。
-- ウィンドウごとの走査は STA 制約に注意（Python 版はウィンドウ単位で逐次処理）。MTA + 通常のプロパティアクセスで問題ないケースが多いが、要検証。
+- 走査対象ウィンドウは最大 8 スレッドで並列に走査する（各スレッドが自前の MTA と UIA オブジェクトを持つ）。結果は走査対象の順に後処理する。
+- CacheRequest は `AutomationElementMode_None`（読むのはキャッシュ値のみ）。Value もキャッシュし、200 文字に切り詰めて保持する。ClickablePoint もキャッシュから読み、要素ごとの `GetClickablePoint` 往復はしない。
 - リトライ: COM 一時失敗に指数バックオフ（Python 版 THREAD_MAX_RETRIES=3）。

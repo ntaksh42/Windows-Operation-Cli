@@ -57,11 +57,10 @@ pub fn doctor() -> String {
     .expect("doctor report only contains serializable values")
 }
 
+/// Scans `PATH` in-process; spawning `where.exe` for each shell cost more
+/// than every other check put together.
 fn command_exists(name: &str) -> bool {
-    std::process::Command::new("where.exe")
-        .arg(name)
-        .output()
-        .is_ok_and(|output| output.status.success())
+    crate::powershell::which(name).is_some()
 }
 
 #[cfg(test)]

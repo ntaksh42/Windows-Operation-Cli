@@ -3,6 +3,11 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Mutex, PoisonError};
+
+use windows::Win32::UI::Shell::ShellExecuteW;
+use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+use windows::core::{HSTRING, PCWSTR, w};
 
 use crate::{powershell, win};
 
@@ -92,17 +97,6 @@ fn ps_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
-/// Checks whether an app with the given AppID exists in `shell:AppsFolder`.
-fn check_app_exists(app_id: &str) -> bool {
-    let command = format!(
-        "$folder = (New-Object -ComObject Shell.Application).NameSpace('shell:AppsFolder'); \
-         if ($folder) {{ [bool]$folder.ParseName({}) }} else {{ $false }}",
-        ps_quote(app_id)
-    );
-    let (response, status) = powershell::execute_command(&command, 10, None);
-    status == 0 && response.trim().eq_ignore_ascii_case("true")
-}
-
 /// Title-cases each whitespace-separated word, mirroring Python's `str.title()`
 /// as used for the App tool's response messages.
 pub fn title_case(s: &str) -> String {
@@ -121,29 +115,77 @@ pub fn title_case(s: &str) -> String {
 /// Launches a Start Menu app matching `name` (fuzzy, score_cutoff 70).
 /// Returns `(response, status_code, pid, matched_name)`; `pid` is `None` when unknown
 /// (e.g. `shell:AppsFolder` launches, which `Start-Process` does not report).
-pub fn launch_app(name: &str) -> (String, i32, Option<u32>, String) {
-    let apps = get_apps_from_start_menu();
-    let keys: Vec<&str> = apps.keys().map(String::as_str).collect();
-    let Some((matched_key, _)) = crate::fuzzy::extract_one(name, keys, 70.0) else {
-        return (
-            format!("{} not found in start menu.", title_case(name)),
-            1,
-            None,
-            name.to_string(),
-        );
-    };
-    let matched_key = matched_key.to_string();
-    let Some(appid) = apps.get(&matched_key) else {
-        return (
-            format!("{} not found in start menu.", title_case(name)),
-            1,
-            None,
-            name.to_string(),
-        );
-    };
+/// The Start Menu listing from the last lookup. `Get-StartApps` is a
+/// PowerShell run of its own — most of a launch's time — and the listing only
+/// changes when software is installed, so it is fetched again only when a name
+/// is not found in it.
+static START_APPS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
 
-    if Path::new(appid).exists() || appid.contains('\\') {
-        let exe_path = win::resolve_known_folder_guid_path(appid);
+/// Fills the Start Menu listing in the background, so the first `App` launch
+/// does not wait on `Get-StartApps` (~1.3s, most of it PowerShell start-up).
+/// A launch that arrives first blocks on the same lock rather than fetching
+/// the listing a second time.
+pub fn prefetch_start_apps() {
+    std::thread::spawn(|| {
+        let mut cached = START_APPS.lock().unwrap_or_else(PoisonError::into_inner);
+        if cached.is_none() {
+            *cached = Some(get_apps_from_start_menu());
+        }
+    });
+}
+
+/// Finds the Start Menu entry best matching `name`, as `(key, AppID or path)`.
+fn find_start_app(name: &str) -> Option<(String, String)> {
+    let mut cached = START_APPS.lock().unwrap_or_else(PoisonError::into_inner);
+    for refresh in [false, true] {
+        if refresh || cached.is_none() {
+            *cached = Some(get_apps_from_start_menu());
+        }
+        let apps = cached.as_ref().expect("filled above");
+        let keys: Vec<&str> = apps.keys().map(String::as_str).collect();
+        if let Some((key, _)) = crate::fuzzy::extract_one(name, keys, 70.0) {
+            let key = key.to_string();
+            let target = apps[&key].clone();
+            return Some((key, target));
+        }
+        if refresh {
+            break;
+        }
+    }
+    None
+}
+
+/// Activates a packaged app through the shell, in-process. Going through
+/// `Start-Process` cost a PowerShell run, and checking the AppID first
+/// another; the shell refuses an unknown AppID by itself.
+fn open_apps_folder_item(app_id: &str) -> bool {
+    let _ = crate::uia::ensure_com_initialized();
+    let target = HSTRING::from(format!("shell:AppsFolder\\{app_id}"));
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            w!("open"),
+            &target,
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    // ShellExecute reports success as a value greater than 32.
+    result.0 as usize > 32
+}
+
+pub fn launch_app(name: &str) -> (String, i32, Option<u32>, String) {
+    let Some((matched_key, appid)) = find_start_app(name) else {
+        return (
+            format!("{} not found in start menu.", title_case(name)),
+            1,
+            None,
+            name.to_string(),
+        );
+    };
+    if Path::new(&appid).exists() || appid.contains('\\') {
+        let exe_path = win::resolve_known_folder_guid_path(&appid);
         let command = format!(
             "Start-Process {} -PassThru | Select-Object -ExpandProperty Id",
             ps_quote(&exe_path)
@@ -155,20 +197,14 @@ pub fn launch_app(name: &str) -> (String, i32, Option<u32>, String) {
             None
         };
         (response, status, pid, matched_key)
+    } else if open_apps_folder_item(&appid) {
+        (String::new(), 0, None, matched_key)
     } else {
-        if !check_app_exists(appid) {
-            return (
-                format!("Invalid app identifier: {appid}"),
-                1,
-                None,
-                matched_key,
-            );
-        }
-        let command = format!(
-            "Start-Process {}",
-            ps_quote(&format!("shell:AppsFolder\\{appid}"))
-        );
-        let (response, status) = powershell::execute_command(&command, 10, None);
-        (response, status, None, matched_key)
+        (
+            format!("Invalid app identifier: {appid}"),
+            1,
+            None,
+            matched_key,
+        )
     }
 }

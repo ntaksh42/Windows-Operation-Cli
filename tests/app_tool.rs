@@ -25,6 +25,7 @@ fn params(mode: AppMode) -> AppParams {
         executable: None,
         args: None,
         cwd: None,
+        snapshot: None,
     }
 }
 

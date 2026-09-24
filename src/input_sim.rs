@@ -30,7 +30,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 /// WHEEL_DELTA from winuser.h: one "notch" of mouse wheel rotation.
 const WHEEL_DELTA: i32 = 120;
-const DEFAULT_INPUT_SETTLE_MS: u64 = 50;
+/// One 60Hz frame and a little over: enough for the target to react to the
+/// input before the tool returns. It was 50ms, which was most of the latency of
+/// a Move or Shortcut call.
+const DEFAULT_INPUT_SETTLE_MS: u64 = 20;
 const MAX_INPUT_SETTLE_MS: u64 = 5_000;
 const DEFAULT_CLICK_HOLD_MS: u64 = 15;
 const MAX_CLICK_HOLD_MS: u64 = 1_000;
@@ -499,15 +502,16 @@ pub fn chord(vks: &[u16], wait_after: Duration) -> Result<(), String> {
             return Err(error);
         }
         pressed.push(vk);
-        sleep(Duration::from_millis(10));
     }
+    // One hold for the whole chord. The events queue in order, so the target
+    // already sees every modifier down before the key; a 10ms gap after each
+    // press and release only added 50ms to a two-key shortcut.
     sleep(Duration::from_millis(10));
     let mut release_error = None;
     for &vk in pressed.iter().rev() {
         if let Err(error) = key_up(vk) {
             release_error.get_or_insert(error);
         }
-        sleep(Duration::from_millis(10));
     }
     sleep(wait_after);
     release_error.map_or(Ok(()), Err)
@@ -678,10 +682,10 @@ mod tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
-    fn input_settle_delay_defaults_to_fifty_milliseconds() {
+    fn input_settle_delay_defaults_to_twenty_milliseconds() {
         let _guard = ENV_LOCK.lock().unwrap();
         unsafe { std::env::remove_var("WINDOWS_MCP_INPUT_SETTLE_MS") };
-        assert_eq!(input_settle_delay(), Duration::from_millis(50));
+        assert_eq!(input_settle_delay(), Duration::from_millis(20));
     }
 
     #[test]
@@ -695,7 +699,7 @@ mod tests {
         assert_eq!(input_settle_delay(), Duration::from_millis(5000));
 
         unsafe { std::env::set_var("WINDOWS_MCP_INPUT_SETTLE_MS", "invalid") };
-        assert_eq!(input_settle_delay(), Duration::from_millis(50));
+        assert_eq!(input_settle_delay(), Duration::from_millis(20));
 
         unsafe { std::env::remove_var("WINDOWS_MCP_INPUT_SETTLE_MS") };
     }

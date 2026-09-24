@@ -56,12 +56,12 @@ Prefer non-UI tools when they can do the job: editing a file with `FileSystem` o
 Launch an app and use it:
 
 ```
-App(mode="launch", name="notepad")
-WaitFor(condition="active_window", window_name="Notepad")
-Snapshot()                          # get element ids
-InvokeElement(element_id=...)       # or Type(label=..., text=...)
-Screenshot()                        # verify result
+App(mode="launch", name="calculator", snapshot=true)   # waits for the window, returns element ids
+InvokeElement(element_ids=[id_8, id_multiply, id_9, id_equals])
+                                    # response ends with the changed text, e.g. "72"
 ```
+
+Every tool call is a full model round trip, which costs far more than the tool itself. Batch actions (`element_ids`, `MultiEdit`, `MultiSelect`), ask `App` for its `snapshot`, and read the result from `InvokeElement`'s text report instead of taking another Snapshot or Screenshot just to confirm.
 
 Fill a form with several fields: `MultiEdit(labels=[[label, text], ...])` instead of repeated Type calls. Select multiple files/items: `MultiSelect`.
 

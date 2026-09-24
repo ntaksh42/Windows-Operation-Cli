@@ -15,13 +15,15 @@ use std::time::Duration;
 
 use windows::Win32::Foundation::{HWND, POINT, RECT, VARIANT_FALSE, VARIANT_TRUE};
 use windows::Win32::System::Com::{
-    CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
+    CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
 };
 use windows::Win32::System::Ole::{
     SafeArrayAccessData, SafeArrayDestroy, SafeArrayGetLBound, SafeArrayGetUBound,
     SafeArrayUnaccessData,
 };
-use windows::Win32::System::Variant::{VARIANT, VARIANT_0_0, VARIANT_0_0_0, VT_BOOL, VT_I4};
+use windows::Win32::System::Variant::{
+    VARIANT, VARIANT_0_0, VARIANT_0_0_0, VT_ARRAY, VT_BOOL, VT_BSTR, VT_I4, VT_R8,
+};
 use windows::Win32::UI::Accessibility::*;
 use windows::core::{Interface, Result as WinResult};
 
@@ -51,7 +53,14 @@ pub struct RawElement {
     /// "ScrollPattern の有無で判定" instruction).
     pub is_scrollable: bool,
     pub vertical_scroll_percent: f64,
+    /// `ValuePattern.Value`, cut to [`MAX_VALUE_CHARS`]: what an input field
+    /// holds, which its `Name` (the field's label) does not say.
+    pub value: String,
 }
+
+/// Longest value kept per element. Values are read to report what changed,
+/// not to transfer documents.
+pub const MAX_VALUE_CHARS: usize = 200;
 
 thread_local! {
     static COM_INITIALIZED: Cell<bool> = const { Cell::new(false) };
@@ -72,6 +81,28 @@ pub fn ensure_com_initialized() -> Result<(), String> {
             Err(format!("CoInitializeEx failed: {hr:?}"))
         }
     })
+}
+
+/// COM initialized as MTA for as long as the guard lives, for a short-lived
+/// worker thread. [`ensure_com_initialized`] is for threads that live on and
+/// never uninitialize; a worker that exits should.
+pub struct ComApartment(());
+
+impl ComApartment {
+    pub fn enter() -> Result<Self, String> {
+        let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        if hr.is_ok() {
+            Ok(Self(()))
+        } else {
+            Err(format!("CoInitializeEx failed: {hr:?}"))
+        }
+    }
+}
+
+impl Drop for ComApartment {
+    fn drop(&mut self) {
+        unsafe { CoUninitialize() };
+    }
 }
 
 /// Creates the `IUIAutomation` root object (`CUIAutomation`).
@@ -195,8 +226,8 @@ fn variant_bool(value: bool) -> VARIANT {
 /// Builds the `IUIAutomationCacheRequest` used for every window walk:
 /// registers the properties and patterns docs/SPEC.md §6 item 2 calls out
 /// (Name/ControlType/BoundingRectangle/IsEnabled/IsOffscreen/
-/// IsKeyboardFocusable/HasKeyboardFocus/AutomationId/ClassName, plus
-/// Invoke/Value/Toggle/Scroll/SelectionItem/ExpandCollapse/Window pattern
+/// IsKeyboardFocusable/HasKeyboardFocus/AutomationId/ClassName/ClickablePoint,
+/// plus Invoke/Value/Toggle/Scroll/SelectionItem/ExpandCollapse/Window pattern
 /// availability) so every element read below is a `Cached*` read.
 pub fn build_cache_request(
     automation: &IUIAutomation,
@@ -204,7 +235,10 @@ pub fn build_cache_request(
 ) -> WinResult<IUIAutomationCacheRequest> {
     let cache = unsafe { automation.CreateCacheRequest()? };
     unsafe {
-        cache.SetAutomationElementMode(AutomationElementMode_Full)?;
+        // Every read is a cached one, so the elements need no live reference
+        // back to their provider. Marshaling one per element cost ~20% of a
+        // whole-desktop sweep.
+        cache.SetAutomationElementMode(AutomationElementMode_None)?;
         cache.SetTreeScope(TreeScope_Subtree)?;
         cache.SetTreeFilter(tree_filter)?;
         for property in [
@@ -217,6 +251,8 @@ pub fn build_cache_request(
             UIA_HasKeyboardFocusPropertyId,
             UIA_AutomationIdPropertyId,
             UIA_ClassNamePropertyId,
+            UIA_ClickablePointPropertyId,
+            UIA_ValueValuePropertyId,
         ] {
             cache.AddProperty(property)?;
         }
@@ -375,16 +411,13 @@ unsafe fn read_element(element: &IUIAutomationElement) -> RawElement {
             supported_actions.push(crate::state::SupportedAction::ExpandCollapse);
         }
 
-        // GetClickablePoint is a live cross-process call, not a Cached* read,
-        // so it is asked only for elements whose geometric center is actually
-        // in doubt (see `needs_clickable_point`). Everything else keeps the
-        // one-cache-build-per-window cost model.
+        // The clickable point is read from the cache rather than through
+        // `GetClickablePoint`, a live cross-process call measured at ~12ms per
+        // element — most of a foreground capture's cost, for a value most
+        // providers do not even supply. It is still only used where the
+        // geometric center is in doubt (see `needs_clickable_point`).
         let clickable_point = if needs_clickable_point(control_type, &rect) {
-            let mut point = POINT::default();
-            match element.GetClickablePoint(&mut point) {
-                Ok(got) if got.as_bool() => Some((point.x, point.y)),
-                _ => None,
-            }
+            cached_clickable_point(element)
         } else {
             None
         };
@@ -404,12 +437,13 @@ unsafe fn read_element(element: &IUIAutomationElement) -> RawElement {
             is_scrollable,
             vertical_scroll_percent,
             clickable_point,
+            value: cached_value(element),
         }
     }
 }
 
-/// Whether an element's geometric center is unreliable enough to justify the
-/// extra cross-process `GetClickablePoint` call.
+/// Whether an element's geometric center is unreliable enough to prefer the
+/// provider's clickable point over it.
 ///
 /// Containers and large controls are the cases that miss in practice: a tab
 /// item, list item, or menu item whose middle is covered by a child, and
@@ -433,6 +467,52 @@ fn needs_clickable_point(control_type: i32, rect: &RECT) -> bool {
             | UIA_SplitButtonControlTypeId
     );
     is_container_type || width >= LARGE_EDGE || height >= LARGE_EDGE
+}
+
+/// Reads the cached `ValuePattern.Value`, or an empty string when the
+/// element has none.
+unsafe fn cached_value(element: &IUIAutomationElement) -> String {
+    unsafe {
+        let Ok(value) = element.GetCachedPropertyValue(UIA_ValueValuePropertyId) else {
+            return String::new();
+        };
+        let raw = &value.Anonymous.Anonymous;
+        if raw.vt != VT_BSTR {
+            return String::new();
+        }
+        raw.Anonymous
+            .bstrVal
+            .to_string()
+            .chars()
+            .take(MAX_VALUE_CHARS)
+            .collect()
+    }
+}
+
+/// Reads the cached `ClickablePoint` property: a `VT_R8` array of `[x, y]`,
+/// or empty when the provider supplies none.
+unsafe fn cached_clickable_point(element: &IUIAutomationElement) -> Option<(i32, i32)> {
+    unsafe {
+        let value = element
+            .GetCachedPropertyValue(UIA_ClickablePointPropertyId)
+            .ok()?;
+        let raw = &value.Anonymous.Anonymous;
+        if raw.vt != VT_ARRAY | VT_R8 {
+            return None;
+        }
+        let array = raw.Anonymous.parray;
+        if array.is_null()
+            || SafeArrayGetUBound(array, 1).ok()? - SafeArrayGetLBound(array, 1).ok()? < 1
+        {
+            return None;
+        }
+        let mut data = std::ptr::null_mut();
+        SafeArrayAccessData(array, &mut data).ok()?;
+        let point = std::slice::from_raw_parts(data.cast::<f64>(), 2);
+        let point = (point[0].round() as i32, point[1].round() as i32);
+        let _ = SafeArrayUnaccessData(array);
+        Some(point)
+    }
 }
 
 unsafe fn runtime_id_from_safe_array(
@@ -473,13 +553,12 @@ pub fn walk_window(
     cache_request: &IUIAutomationCacheRequest,
     condition: &IUIAutomationCondition,
     hwnd: HWND,
-    reverse_children: bool,
 ) -> WinResult<(RawElement, Vec<RawElement>)> {
     unsafe {
         let root = automation.ElementFromHandleBuildCache(hwnd, cache_request)?;
         let root_raw = read_element(&root);
         let mut elements = Vec::new();
-        let walked = collect_cached_children(&root, None, reverse_children, &mut elements);
+        let walked = collect_cached_children(&root, None, &mut elements);
 
         // The cached walk descends through `GetCachedChildren`, which only
         // returns children matching the cache request's TreeFilter. A window
@@ -491,7 +570,10 @@ pub fn walk_window(
         // than stopping at the first non-matching level.
         if walked.is_err() || elements.is_empty() {
             elements.clear();
-            let array = root.FindAllBuildCache(TreeScope_Subtree, condition, cache_request)?;
+            // The cached root holds no live reference (`AutomationElementMode_None`),
+            // so searching from it needs one fetched fresh.
+            let live_root = automation.ElementFromHandle(hwnd)?;
+            let array = live_root.FindAllBuildCache(TreeScope_Subtree, condition, cache_request)?;
             let len = array.Length()?.max(0) as usize;
             elements.reserve(len);
             for i in 0..len as i32 {
@@ -853,24 +935,26 @@ pub fn caret_info() -> Result<String, String> {
 unsafe fn collect_cached_children(
     element: &IUIAutomationElement,
     parent_index: Option<usize>,
-    reverse_children: bool,
     output: &mut Vec<RawElement>,
 ) -> WinResult<()> {
     unsafe {
-        let array = element.GetCachedChildren()?;
-        let len = array.Length()?.max(0);
-        let indices: Box<dyn Iterator<Item = i32>> = if reverse_children {
-            Box::new((0..len).rev())
-        } else {
-            Box::new(0..len)
+        // A leaf answers with S_OK and a null array, which windows-rs surfaces
+        // as an error carrying no HRESULT. Treating that as a failure aborted
+        // the walk at the first leaf, so every window paid for a second,
+        // uncached `FindAllBuildCache` pass on top of this one.
+        let array = match element.GetCachedChildren() {
+            Ok(array) => array,
+            Err(error) if error.code().is_ok() => return Ok(()),
+            Err(error) => return Err(error),
         };
-        for index in indices {
+        let len = array.Length()?.max(0);
+        for index in 0..len {
             let child = array.GetElement(index)?;
             let child_index = output.len();
             let mut raw = read_element(&child);
             raw.parent_index = parent_index;
             output.push(raw);
-            collect_cached_children(&child, Some(child_index), reverse_children, output)?;
+            collect_cached_children(&child, Some(child_index), output)?;
         }
         Ok(())
     }

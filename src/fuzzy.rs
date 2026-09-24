@@ -61,7 +61,8 @@ where
     I: IntoIterator<Item = &'a str>,
 {
     let query_lower = query.to_lowercase();
-    let mut best: Option<(&str, f64)> = None;
+    // (candidate, score, whole-string ratio)
+    let mut best: Option<(&str, f64, f64)> = None;
     for candidate in candidates {
         let candidate_lower = candidate.to_lowercase();
         // A short query against a long candidate ("paint" vs "Untitled -
@@ -69,18 +70,37 @@ where
         // Start Menu lookups missed obvious matches. partial_ratio asks the
         // question the caller actually means: does the query appear inside the
         // candidate? Keep the better of the two.
-        let score = ratio(&query_lower, &candidate_lower)
-            .max(partial_ratio(&query_lower, &candidate_lower));
-        if score >= score_cutoff && best.is_none_or(|(_, b)| score > b) {
-            best = Some((candidate, score));
+        let whole = ratio(&query_lower, &candidate_lower);
+        let score = whole.max(partial_ratio(&query_lower, &candidate_lower));
+        // partial_ratio scores every candidate containing the query at 100,
+        // so ties are common: "設定" against both "設定" and "Office 言語設定".
+        // The first one seen used to win, and candidates often come from a
+        // HashMap, so the choice was arbitrary. Break the tie by how much of
+        // the candidate the query covers, which puts an exact name first.
+        let better = best.is_none_or(|(_, best_score, best_whole)| {
+            score > best_score || (score == best_score && whole > best_whole)
+        });
+        if score >= score_cutoff && better {
+            best = Some((candidate, score, whole));
         }
     }
-    best
+    best.map(|(candidate, score, _)| (candidate, score))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_exact_name_beats_a_longer_one_containing_it() {
+        // Both contain the query, so both score 100; order must not decide.
+        for candidates in [
+            ["office 言語設定", "設定", "設定アプリの既定"],
+            ["設定アプリの既定", "設定", "office 言語設定"],
+        ] {
+            assert_eq!(extract_one("設定", candidates, 70.0).unwrap().0, "設定");
+        }
+    }
 
     #[test]
     fn ratio_identical_is_100() {

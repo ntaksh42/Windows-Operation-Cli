@@ -107,8 +107,9 @@ fn invoke_element_activates_a_button_without_coordinates() {
 
     app.drain_events();
     let message = invoke_element::invoke_element(InvokeElementParams {
-        element_id: button.element_id,
+        element_id: Some(button.element_id),
         fallback_to_click: None,
+        ..Default::default()
     })
     .expect("InvokeElement failed on a button exposing InvokePattern");
     assert!(
@@ -137,8 +138,9 @@ fn invoke_element_toggles_a_checkbox_and_the_window_agrees() {
 
     app.drain_events();
     invoke_element::invoke_element(InvokeElementParams {
-        element_id: checkbox.element_id,
+        element_id: Some(checkbox.element_id),
         fallback_to_click: None,
+        ..Default::default()
     })
     .expect("InvokeElement failed on a checkbox exposing TogglePattern");
 
@@ -171,8 +173,9 @@ fn a_stale_element_id_is_rejected_against_a_live_window() {
     let _ = snapshot_app(&app);
 
     let error = invoke_element::invoke_element(InvokeElementParams {
-        element_id: stale_id,
+        element_id: Some(stale_id),
         fallback_to_click: None,
+        ..Default::default()
     })
     .expect_err("an element id from a superseded Snapshot must not be invoked");
     assert!(
@@ -340,8 +343,9 @@ fn selecting_a_list_item_reports_through_uia() {
 
     app.drain_events();
     invoke_element::invoke_element(InvokeElementParams {
-        element_id: item.element_id,
+        element_id: Some(item.element_id),
         fallback_to_click: None,
+        ..Default::default()
     })
     .expect("InvokeElement failed on a list item");
 
@@ -350,4 +354,67 @@ fn selecting_a_list_item_reports_through_uia() {
         "the listbox selection is {}, expected 1",
         app.list_selection()
     );
+}
+
+/// An invoke reports what its window shows afterwards that the last Snapshot
+/// did not — including a field's value, which its label does not carry — so
+/// the caller can read a result without another Snapshot.
+#[test]
+#[ignore = "requires an interactive Windows desktop session; run with --ignored"]
+fn invoke_reports_a_value_that_appeared_after_the_snapshot() {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::SetWindowTextW;
+    use windows::core::w;
+
+    let _desktop = desktop_lock();
+    let Some(app) = TestApp::launch("Invoke Report") else {
+        return;
+    };
+    let nodes = snapshot_app(&app);
+    let button = find_named(&nodes, BUTTON_TEXT).expect("the push button was not discovered");
+
+    // Stands in for the action's own effect: the field changes after the
+    // Snapshot was taken.
+    unsafe { SetWindowTextW(HWND(app.edit_hwnd() as *mut _), w!("result 72")) }
+        .expect("could not set the edit text");
+
+    let message = invoke_element::invoke_element(InvokeElementParams {
+        element_id: Some(button.element_id),
+        ..Default::default()
+    })
+    .expect("InvokeElement failed");
+    assert!(
+        message.contains("\"result 72\""),
+        "the new field value was not reported: {message:?}"
+    );
+}
+
+/// `element_ids` runs every element in order in one call: toggling the same
+/// checkbox twice leaves it where it started, having gone through both states.
+#[test]
+#[ignore = "requires an interactive Windows desktop session; run with --ignored"]
+fn element_ids_invoke_each_element_in_order() {
+    let _desktop = desktop_lock();
+    let Some(app) = TestApp::launch("Invoke Batch") else {
+        return;
+    };
+    let nodes = snapshot_app(&app);
+    let checkbox = find_named(&nodes, CHECKBOX_TEXT).expect("the checkbox was not discovered");
+    let before = app.is_checked();
+
+    let message = invoke_element::invoke_element(InvokeElementParams {
+        element_ids: Some(ListOrString::List(vec![
+            checkbox.element_id,
+            checkbox.element_id,
+        ])),
+        report_text: Some(windows_operation_cli::params::BoolOrString::Bool(false)),
+        ..Default::default()
+    })
+    .expect("InvokeElement failed");
+    assert_eq!(
+        message.lines().count(),
+        2,
+        "expected one line per invoked element: {message:?}"
+    );
+    assert_eq!(app.is_checked(), before, "two toggles should cancel out");
 }

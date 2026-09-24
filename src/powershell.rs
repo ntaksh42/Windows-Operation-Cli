@@ -2,17 +2,18 @@
 //! `windows_mcp.powershell` package (docs/SPEC.md §3).
 
 use std::collections::{HashMap, HashSet};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::os::windows::process::CommandExt;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::{Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use windows::Win32::System::Console::{CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent};
-use windows::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP;
+use windows::Win32::System::Console::{CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent, GetConsoleCP};
+use windows::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
 use windows::Win32::System::WindowsProgramming::{GetComputerNameW, GetUserNameW};
 use windows::core::PWSTR;
 use windows_registry::{CURRENT_USER, LOCAL_MACHINE, Type};
@@ -24,6 +25,93 @@ const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 const FALLBACK_PATHEXT: &str =
     ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC;.CPL;.PY;.PYW";
+
+/// A shell started ahead of the command it will run, parked in the bootstrap
+/// waiting for that command on stdin.
+///
+/// Starting `pwsh` is ~500ms of every call — .NET start-up and engine
+/// initialization — against a few milliseconds for a typical command. Each
+/// call still runs in its own fresh process, exactly as before; the process was
+/// just started while the previous call's caller was busy with something else.
+struct WarmShell {
+    shell: String,
+    env: HashMap<String, String>,
+    child: Child,
+}
+
+static WARM_SHELL: Mutex<Option<WarmShell>> = Mutex::new(None);
+
+/// Takes the parked shell if it was started with exactly this shell and
+/// environment. A mismatch — the registry environment changed since, say —
+/// means it would not run the command the way a fresh start would, so it is
+/// discarded.
+fn take_warm_shell(shell: &str, env: &HashMap<String, String>) -> Option<Child> {
+    let mut warm = WARM_SHELL
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take()?;
+    if warm.shell == shell && &warm.env == env && matches!(warm.child.try_wait(), Ok(None)) {
+        return Some(warm.child);
+    }
+    let _ = warm.child.kill();
+    let _ = warm.child.wait();
+    None
+}
+
+/// Starts the shell for the next call in the background.
+fn park_warm_shell(shell: String, env: HashMap<String, String>) {
+    thread::spawn(move || {
+        let Ok(child) = spawn_shell(&shell, &env) else {
+            return;
+        };
+        let previous = WARM_SHELL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .replace(WarmShell { shell, env, child });
+        if let Some(mut previous) = previous {
+            let _ = previous.child.kill();
+            let _ = previous.child.wait();
+        }
+    });
+}
+
+/// Starts `shell` running the bootstrap, which reads the command from stdin.
+fn spawn_shell(shell: &str, env: &HashMap<String, String>) -> std::io::Result<Child> {
+    let mut args = vec!["-NoProfile".to_string()];
+    if shell_basename_lower(shell) == "powershell" {
+        args.push("-OutputFormat".to_string());
+        args.push("Text".to_string());
+    }
+    args.push("-EncodedCommand".to_string());
+    args.push(build_encoded_command(BOOTSTRAP));
+
+    Command::new(shell)
+        .args(&args)
+        .current_dir(crate::win::home_dir())
+        .env_clear()
+        .envs(env)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .creation_flags(creation_flags())
+        .spawn()
+}
+
+/// `CREATE_NEW_PROCESS_GROUP`, plus `CREATE_NO_WINDOW` when this server has no
+/// console of its own.
+///
+/// A console-less parent makes the shell open a console window of its own,
+/// which takes the foreground from whatever the caller was driving — and a
+/// parked shell would keep it open. With a console to share, the shell uses
+/// that one, which is also what lets `CTRL_BREAK_EVENT` reach it on timeout.
+fn creation_flags() -> u32 {
+    let has_console = unsafe { GetConsoleCP() } != 0;
+    if has_console {
+        CREATE_NEW_PROCESS_GROUP.0
+    } else {
+        CREATE_NEW_PROCESS_GROUP.0 | CREATE_NO_WINDOW.0
+    }
+}
 
 /// Executes a PowerShell `command`, returning `(output, status_code)`.
 ///
@@ -37,33 +125,24 @@ pub fn execute_command(
     let shell = shell_override
         .map(str::to_string)
         .unwrap_or_else(pick_shell);
-    let encoded = build_encoded_command(command);
-
-    let mut args = vec!["-NoProfile".to_string()];
-    if shell_basename_lower(&shell) == "powershell" {
-        args.push("-OutputFormat".to_string());
-        args.push("Text".to_string());
-    }
-    args.push("-EncodedCommand".to_string());
-    args.push(encoded);
 
     let mut env = prepare_env();
     env.insert("NO_COLOR".to_string(), "1".to_string());
 
-    let mut cmd = Command::new(&shell);
-    cmd.args(&args)
-        .current_dir(crate::win::home_dir())
-        .env_clear()
-        .envs(&env)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .creation_flags(CREATE_NEW_PROCESS_GROUP.0);
-
-    let mut child = match cmd.spawn() {
+    let child = match take_warm_shell(&shell, &env) {
+        Some(child) => Ok(child),
+        None => spawn_shell(&shell, &env),
+    };
+    park_warm_shell(shell, env);
+    let mut child = match child {
         Ok(child) => child,
         Err(e) => return (format!("Command execution failed: {e}"), 1),
     };
+    // Dropping stdin closes it, which is what ends the bootstrap's read. A
+    // write error means the shell already exited; its status says why.
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(BASE64.encode(command.as_bytes()).as_bytes());
+    }
 
     let stdout_rx = spawn_reader(child.stdout.take().expect("stdout piped"));
     let stderr_rx = spawn_reader(child.stderr.take().expect("stderr piped"));
@@ -178,6 +257,21 @@ fn spawn_reader(mut pipe: impl Read + Send + 'static) -> Receiver<Vec<u8>> {
     rx
 }
 
+/// What every shell runs: read the base64 UTF-8 command from stdin, then run
+/// it the way `-Command` would.
+///
+/// The command runs dot-sourced, in the script scope `-Command` uses. `-Command`
+/// exits 1 when the last statement failed, which `$?` after a dot-sourced
+/// script block does not reflect, so the check is appended to the command
+/// itself. A command that does not parse exits 1 with no output, as it does
+/// under `-Command`. The first line warms the formatter and script-block compiler while
+/// the shell is still parked, rather than on the caller's time.
+const BOOTSTRAP: &str = "$null = Get-ChildItem -LiteralPath $PSHOME -Filter *.dll | \
+    Select-Object -First 2 | Format-Table | Out-String; \
+    . $(try { [scriptblock]::Create([System.Text.Encoding]::UTF8.GetString(\
+    [Convert]::FromBase64String([Console]::In.ReadToEnd())) + \"`n\" + 'if (-not $?) { exit 1 }') } \
+    catch { exit 1 })";
+
 /// Builds the `-EncodedCommand` payload: UTF-8 output prefix, encoded as
 /// UTF-16LE, then base64. See docs/SPEC.md §3.
 fn build_encoded_command(command: &str) -> String {
@@ -210,7 +304,7 @@ fn pick_shell() -> String {
 
 /// Minimal `shutil.which` equivalent: scans `PATH` (current process
 /// environment), applying `PATHEXT` extensions when `name` has none.
-fn which(name: &str) -> Option<std::path::PathBuf> {
+pub(crate) fn which(name: &str) -> Option<std::path::PathBuf> {
     let path_var = std::env::var_os("PATH")?;
     let has_ext = std::path::Path::new(name).extension().is_some();
     let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| FALLBACK_PATHEXT.to_string());
