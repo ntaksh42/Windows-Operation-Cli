@@ -115,6 +115,7 @@ Cursor Position: (x, y)
 Screenshot Size: (W,H)  ← 縮小時は Original Size + Coordinate Scale (逆数を掛けよの指示)
 Visible Displays: ...
 [Screenshot Backend: ...]  ← use_vision 時
+[Screenshot Warning: ...]  ← 画像がほぼ真っ黒だった時（ロック中・RDP 最小化・非対話セッション等）
 
 Active Desktop: / All Desktops: （仮想デスクトップ名テーブル）
 Focused Window: / Opened Windows: （Name Depth Status Width Height Handle テーブル）

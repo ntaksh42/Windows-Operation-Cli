@@ -44,6 +44,8 @@ Screen vs. window capture:
 
 With `window`, the output has `Screenshot Window: <title>` and `Screenshot Backend: printwindow`. If the window cannot render itself (some GPU-rendered apps), it falls back to the window's screen region and says so in the backend line; windows in front of it then appear in the image. A coordinate taken from a window capture is only clickable if nothing covers that point — bring the window forward (`App`) before clicking.
 
+A `Screenshot Warning:` line means the image came back almost entirely black: Windows gave no desktop content (locked workstation, secure desktop, minimized or disconnected RDP, or a server outside the interactive session). Do not read or click from that image; run `Doctor`.
+
 ### Snapshot
 
 UI accessibility tree with element ids and semantic actions.

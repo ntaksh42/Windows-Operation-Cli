@@ -19,7 +19,8 @@ use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_MODE_ROTATION_ROTATE90, DXGI_MODE_ROTATION_ROTATE180, DXGI_MODE_ROTATION_ROTATE270,
 };
 use windows::Win32::Graphics::Dxgi::{
-    CreateDXGIFactory1, DXGI_OUTDUPL_FRAME_INFO, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput1,
+    CreateDXGIFactory1, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, IDXGIAdapter1,
+    IDXGIFactory1, IDXGIOutput1,
 };
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC,
@@ -158,7 +159,7 @@ pub fn capture_rect_with_backend(
 /// A real desktop always lights up most of its pixels — even a dark theme
 /// sits well above zero. Sampling every 64th pixel keeps this at a fraction
 /// of a millisecond on a 4K frame while still being decisive.
-fn is_blank(image: &image::RgbaImage) -> bool {
+pub fn is_blank(image: &image::RgbaImage) -> bool {
     const STRIDE: usize = 64;
     let raw = image.as_raw();
     let mut sampled = 0u32;
@@ -252,16 +253,23 @@ unsafe fn capture_output(
         let resource = loop {
             let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
             let mut next = None;
-            duplication
-                .AcquireNextFrame(DXGI_ACQUIRE_TIMEOUT_MS, &mut frame_info, &mut next)
-                .map_err(|e| format!("AcquireNextFrame failed: {e}"))?;
-            if frame_info.LastPresentTime != 0 {
-                break next;
+            match duplication.AcquireNextFrame(DXGI_ACQUIRE_TIMEOUT_MS, &mut frame_info, &mut next)
+            {
+                Ok(()) if frame_info.LastPresentTime != 0 => break next,
+                Ok(()) => {
+                    // This frame carries only cursor or metadata changes. Give
+                    // it back before asking for the next one — holding it
+                    // blocks the queue.
+                    drop(next);
+                    let _ = duplication.ReleaseFrame();
+                }
+                // Nothing presented within this wait. That is the idle
+                // desktop the deadline exists for, not a failure: returning
+                // here gave up on the fallback after one wait, every time a
+                // still screen needed it.
+                Err(error) if error.code() == DXGI_ERROR_WAIT_TIMEOUT => {}
+                Err(error) => return Err(format!("AcquireNextFrame failed: {error}")),
             }
-            // This frame carries only cursor or metadata changes. Give it back
-            // before asking for the next one — holding it blocks the queue.
-            drop(next);
-            let _ = duplication.ReleaseFrame();
             if std::time::Instant::now() >= deadline {
                 return Err(
                     "DXGI produced no presented frame before the deadline; the desktop may be idle"
