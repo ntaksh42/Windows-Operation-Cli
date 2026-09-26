@@ -22,6 +22,15 @@ use crate::{capture, display, window};
 pub const MAX_IMAGE_WIDTH: u32 = 1920;
 pub const MAX_IMAGE_HEIGHT: u32 = 1080;
 
+/// Appended to a response whose image came back essentially black from every
+/// backend. The image is still returned — a black desktop is possible — but a
+/// caller reasoning about it must not mistake it for what is on the screen.
+pub const BLANK_CAPTURE_WARNING: &str = "Screenshot Warning: the captured image is almost entirely \
+black. Windows handed back no desktop content, which happens when the workstation is locked, a \
+UAC or other secure desktop is up, the Remote Desktop window is minimized or disconnected, or the \
+server runs outside the interactive session (a service or an SSH login). Do not act on this image; \
+run Doctor to check the capture backends.\n";
+
 /// Parameters for the `Screenshot` tool.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ScreenshotParams {
@@ -261,6 +270,7 @@ fn screenshot_window(query: &str, params: &ScreenshotParams) -> Result<Screensho
     let windows = window::list_snapshot_windows();
     let target = snapshot::find_window(query, &windows)?;
     let (captured, bounds, method) = capture::capture_window(target.handle)?;
+    let blank = capture::is_blank(&captured);
 
     let (orig_width, orig_height) = (captured.width(), captured.height());
     let scale = combined_scale(orig_width, orig_height, resolve_scale());
@@ -302,6 +312,9 @@ fn screenshot_window(query: &str, params: &ScreenshotParams) -> Result<Screensho
             backend.name()
         ),
     };
+    if blank {
+        text += BLANK_CAPTURE_WARNING;
+    }
     Ok(ScreenshotOutput { text, png_bytes })
 }
 

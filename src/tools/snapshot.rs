@@ -1414,6 +1414,7 @@ fn capture_inner(
     let mut png_bytes: Option<Vec<u8>> = None;
     let mut screenshot_size_line: Option<String> = None;
     let mut backend_name: Option<&'static str> = None;
+    let mut blank_capture = false;
     let mut region_text: Option<(String, String)> = None;
 
     if use_vision {
@@ -1438,6 +1439,7 @@ fn capture_inner(
         let backend = capture::resolve_backend();
         let (captured, backend) = capture::capture_rect_with_backend(capture_rect, backend)?;
         backend_name = Some(backend.name());
+        blank_capture = capture::is_blank(&captured);
 
         let orig_width = captured.width();
         let orig_height = captured.height();
@@ -1540,6 +1542,9 @@ fn capture_inner(
     }
     if let Some(name) = backend_name {
         text += &format!("Screenshot Backend: {name}\n");
+    }
+    if blank_capture {
+        text += screenshot::BLANK_CAPTURE_WARNING;
     }
 
     let desktops = vdm::desktops();
