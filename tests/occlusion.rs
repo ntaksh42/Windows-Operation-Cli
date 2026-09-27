@@ -13,10 +13,11 @@ mod harness;
 
 use std::time::{Duration, Instant};
 
-use harness::{TestApp, desktop_lock, layout};
+use harness::{BUTTON_TEXT, TestApp, desktop_lock, layout};
 
 use windows::Win32::Foundation::POINT;
 use windows::Win32::UI::WindowsAndMessaging::WindowFromPoint;
+use windows_operation_cli::tools::snapshot::{SnapshotParams, capture};
 use windows_operation_cli::window::{get_window_rect, is_point_occluded};
 
 /// Waits until `(x, y)` is owned by `hwnd` or one of its child controls.
@@ -117,4 +118,79 @@ fn an_owner_handle_that_no_longer_resolves_is_occluded() {
         is_point_occluded(x, y, 1),
         "a bogus owner handle must be reported as occluded"
     );
+}
+
+/// Stacks two windows of this one process, the back one exactly under the
+/// front one — the shape of two Notepad windows.
+fn stacked_pair(back_title: &str, front_title: &str) -> Option<(TestApp, TestApp)> {
+    let back = TestApp::launch(back_title)?;
+    let front = TestApp::launch(front_title)?;
+    let rect = get_window_rect(back.hwnd()).expect("the back window has no bounds");
+    windows_operation_cli::window::resize_window(
+        front.hwnd(),
+        Some((rect.0, rect.1)),
+        Some((rect.2, rect.3)),
+    )
+    .expect("failed to move the front window over the back one");
+    let (x, y) = back.center_of(layout::BUTTON);
+    assert!(
+        wait_until_point_belongs_to(front.hwnd(), x, y, Duration::from_secs(3)),
+        "the front window never covered the back one"
+    );
+    Some((back, front))
+}
+
+#[test]
+#[ignore = "requires an interactive Windows desktop session; run with --ignored"]
+fn a_foreground_snapshot_leaves_out_a_same_process_window_hidden_behind_it() {
+    let _desktop = desktop_lock();
+    let Some((back, front)) = stacked_pair("Stacked Back", "Stacked Front") else {
+        return;
+    };
+    assert!(
+        front.wait_until(Duration::from_secs(3), || {
+            windows_operation_cli::window::foreground_window()
+                .is_some_and(|window| window.handle == front.hwnd())
+        }),
+        "the front window never reached the foreground"
+    );
+
+    let result = capture(&SnapshotParams::default()).expect("capture failed");
+    assert!(
+        result
+            .interactive_nodes
+            .iter()
+            .any(|node| node.owner_handle == front.hwnd() && node.name == BUTTON_TEXT),
+        "{}",
+        result.text
+    );
+    assert!(
+        !result
+            .interactive_nodes
+            .iter()
+            .any(|node| node.owner_handle == back.hwnd()),
+        "the covered window's controls were reported:\n{}",
+        result.text
+    );
+}
+
+#[test]
+#[ignore = "requires an interactive Windows desktop session; run with --ignored"]
+fn a_covered_window_asked_for_by_name_marks_its_controls_covered() {
+    let _desktop = desktop_lock();
+    let Some(_pair) = stacked_pair("Stacked Named Back", "Stacked Named Front") else {
+        return;
+    };
+
+    let result = capture(&SnapshotParams {
+        window: Some("Stacked Named Back".to_string()),
+        ..Default::default()
+    })
+    .expect("capture failed");
+    let line = result
+        .text
+        .lines()
+        .find(|line| line.contains(&format!("button \"{BUTTON_TEXT}\"")))
+        .unwrap_or_else(|| panic!("the button was not listed:\n{}", result.text));
+    assert!(line.contains("action: covered by another window"), "{line}");
 }

@@ -99,13 +99,14 @@ pub fn app(params: AppParams) -> Result<String, String> {
         AppMode::Switch => switch(name.as_deref()),
         AppMode::LaunchExecutable => unreachable!("handled above"),
     };
-    if !snapshot {
+    if !snapshot || (handle.is_none() && mode != AppMode::Launch) {
         return Ok(message);
     }
     // Capture the window this call acted on, not whatever is in front: a
     // launcher, a toast or a focus-stealing popup can hold the foreground.
     let captured = match handle {
-        Some(handle) => snapshot_when_populated(handle),
+        Some(handle) if mode == AppMode::Launch => snapshot_when_populated(handle),
+        Some(handle) => crate::tools::snapshot::snapshot_window(handle),
         None => crate::tools::snapshot::snapshot(&SnapshotParams::default()),
     };
     let captured = match captured {
@@ -191,8 +192,9 @@ fn launch(name: Option<&str>) -> Outcome {
 fn resize(name: Option<&str>, loc: Option<(i32, i32)>, size: Option<(i32, i32)>) -> Outcome {
     let target = match name {
         Some(name) => match window::find_by_name(name) {
-            Some(w) => w,
-            None => return (format!("Application {} not found.", title_case(name)), None),
+            Ok(Some(w)) => w,
+            Ok(None) => return (format!("Application {} not found.", title_case(name)), None),
+            Err(error) => return (error, None),
         },
         None => match window::foreground_window() {
             Some(w) => w,
@@ -219,8 +221,10 @@ fn switch(name: Option<&str>) -> Outcome {
     let Some(name) = name else {
         return (r#"name is required for mode="switch""#.to_string(), None);
     };
-    let Some(target) = window::find_by_name(name) else {
-        return (format!("Application {} not found.", title_case(name)), None);
+    let target = match window::find_by_name(name) {
+        Ok(Some(target)) => target,
+        Ok(None) => return (format!("Application {} not found.", title_case(name)), None),
+        Err(error) => return (error, None),
     };
 
     let was_minimized = window::is_minimized(target.handle);

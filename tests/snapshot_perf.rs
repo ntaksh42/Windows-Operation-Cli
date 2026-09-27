@@ -8,11 +8,44 @@
 
 #![cfg(target_os = "windows")]
 
+mod harness;
+
 use std::time::Instant;
 
+use harness::{BUTTON_TEXT, TestApp, desktop_lock};
 use windows_operation_cli::params::BoolOrString;
 use windows_operation_cli::tools::snapshot::{SnapshotParams, snapshot};
 use windows_operation_cli::window;
+
+#[test]
+#[ignore = "timing-sensitive; requires an interactive Windows desktop session"]
+fn repeated_foreground_tree_capture_latency() {
+    let _desktop = desktop_lock();
+    let Some(app) = TestApp::launch("Snapshot timing") else {
+        return;
+    };
+    app.wait_until_on_top(std::time::Duration::from_secs(3))
+        .expect("test window never reached the foreground");
+    let params = SnapshotParams {
+        window: Some("Snapshot timing".to_string()),
+        ..Default::default()
+    };
+    for _ in 0..3 {
+        snapshot(&params).expect("warm-up capture failed");
+    }
+    let mut times = Vec::with_capacity(20);
+    for _ in 0..20 {
+        let start = Instant::now();
+        let result = snapshot(&params).expect("capture failed");
+        times.push(start.elapsed().as_secs_f64() * 1000.0);
+        assert!(result.text.contains(BUTTON_TEXT));
+    }
+    times.sort_by(f64::total_cmp);
+    eprintln!(
+        "foreground Snapshot median={:.1}ms p90={:.1}ms",
+        times[10], times[17]
+    );
+}
 
 /// A capture with no UI tree and no screenshot is almost entirely window
 /// enumeration, so it isolates what the rework targeted.

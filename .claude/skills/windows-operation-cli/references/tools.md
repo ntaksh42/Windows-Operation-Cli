@@ -111,7 +111,7 @@ Re-resolves each element by RuntimeId within its owning window and executes the 
 | caret_position | start \| idle \| end | idle | |
 | press_enter | bool | false | |
 
-Text of 20+ chars containing none of `\n`, `\t`, `{`, `}` is pasted via clipboard (original clipboard restored); otherwise sent per keystroke. `\n` becomes Enter, `\t` becomes Tab.
+Text of 20+ UTF-8 bytes containing none of `\n`, `\t`, `\r` is pasted via clipboard (original clipboard restored); otherwise sent per keystroke. `\n` becomes Enter, `\t` becomes Tab.
 
 ### Scroll
 

@@ -34,15 +34,33 @@ pub fn partial_ratio(a: &str, b: &str) -> f64 {
     if short_len == 0 {
         return if long.is_empty() { 100.0 } else { 0.0 };
     }
+    if long.contains(short) {
+        return 100.0;
+    }
+    let short_chars: Vec<char> = short.chars().collect();
     let long_chars: Vec<char> = long.chars().collect();
     if long_chars.len() <= short_len {
         return ratio(short, long);
     }
 
     let mut best = 0.0f64;
+    let mut distances = vec![0usize; short_len];
     for start in 0..=(long_chars.len() - short_len) {
-        let window: String = long_chars[start..start + short_len].iter().collect();
-        let score = ratio(short, &window);
+        for (index, distance) in distances.iter_mut().enumerate() {
+            *distance = index + 1;
+        }
+        let mut distance = short_len;
+        for (index, candidate) in long_chars[start..start + short_len].iter().enumerate() {
+            distance = index + 1;
+            let mut previous = index;
+            for (column, expected) in short_chars.iter().enumerate() {
+                let substitution = previous + usize::from(candidate != expected);
+                previous = distances[column];
+                distance = (distance + 1).min(substitution).min(previous + 1);
+                distances[column] = distance;
+            }
+        }
+        let score = (1.0 - distance as f64 / short_len as f64) * 100.0;
         if score > best {
             best = score;
         }
@@ -119,6 +137,58 @@ mod tests {
     fn partial_ratio_substring_scores_high() {
         // Process name filter uses partial_ratio > 60.
         assert!(partial_ratio("chrome", "googlechromedev.exe") > 60.0);
+    }
+
+    #[test]
+    fn partial_ratio_handles_unicode_near_matches() {
+        assert_eq!(partial_ratio("電卓", "新しい電車"), 50.0);
+    }
+
+    #[test]
+    fn partial_ratio_matches_window_by_window_scoring() {
+        for (short, long) in [
+            ("paint", "Untitled - faint"),
+            ("settings", "System setting"),
+            ("電卓", "新しい電車"),
+        ] {
+            let chars: Vec<char> = long.chars().collect();
+            let width = short.chars().count();
+            let expected = chars
+                .windows(width)
+                .map(|window| ratio(short, &window.iter().collect::<String>()))
+                .fold(0.0f64, f64::max);
+            assert_eq!(partial_ratio(short, long), expected);
+        }
+    }
+
+    #[test]
+    #[ignore = "microbenchmark; run with --release --ignored --nocapture"]
+    fn partial_ratio_microbenchmark() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        let short = "settings";
+        let long = "System setting options and preferences";
+        let chars: Vec<char> = long.chars().collect();
+        let width = short.chars().count();
+        let iterations = 10_000;
+
+        let started = Instant::now();
+        for _ in 0..iterations {
+            black_box(partial_ratio(black_box(short), black_box(long)));
+        }
+        let optimized = started.elapsed();
+
+        let started = Instant::now();
+        for _ in 0..iterations {
+            let score = chars
+                .windows(width)
+                .map(|window| ratio(short, &window.iter().collect::<String>()))
+                .fold(0.0f64, f64::max);
+            black_box(score);
+        }
+        let original = started.elapsed();
+        eprintln!("partial_ratio: optimized={optimized:?}, original={original:?}");
     }
 
     #[test]

@@ -88,12 +88,14 @@ impl ScanOptions {
 /// so the pair carries one title across two processes.
 fn same_application(a: &window::SnapshotWindow, b: &window::SnapshotWindow) -> bool {
     if a.pid == b.pid {
-        return true;
+        return a.class_name != "ApplicationFrameWindow"
+            || b.class_name != "ApplicationFrameWindow"
+            || a.title == b.title;
     }
     let frame_and_core = |x: &window::SnapshotWindow, y: &window::SnapshotWindow| {
         x.class_name == "ApplicationFrameWindow" && y.class_name.starts_with("Windows.UI.Core")
     };
-    frame_and_core(a, b) || frame_and_core(b, a)
+    !a.title.is_empty() && a.title == b.title && (frame_and_core(a, b) || frame_and_core(b, a))
 }
 
 /// Finds the one window whose title best matches `query`.
@@ -147,7 +149,7 @@ pub(crate) fn find_window<'a>(
     // have *different* pids, so treating that as ambiguous made every
     // packaged app unreachable by name. Only a rival that is neither half
     // of such a pair is a real choice for the caller.
-    if scored.get(1).is_some_and(|(candidate, score)| {
+    if scored.iter().skip(1).any(|(candidate, score)| {
         (*score - *best_score).abs() < f64::EPSILON
             && candidate.title.chars().count() == best_len
             && !same_application(best, candidate)
@@ -199,7 +201,7 @@ fn select_scan_targets<'a>(
             let mut application_windows = vec![foreground_window];
             application_windows.extend(windows.iter().filter(|candidate| {
                 candidate.handle != foreground_window.handle
-                    && candidate.pid == foreground_window.pid
+                    && same_application(foreground_window, candidate)
             }));
             Ok(application_windows)
         }
@@ -554,6 +556,45 @@ fn walk_window_with_retry(
     WalkWindowResult::Failed
 }
 
+/// The action verb for a control behind another window: InvokeElement's
+/// patterns still reach it, a coordinate click would hit the window in front.
+const COVERED_ACTION: &str = "covered by another window";
+
+/// Whether a click at `node`'s center would land on a different window.
+///
+/// UI Automation reports a control behind another window as though it were
+/// visible. The two halves of a packaged app's frame/core pair are one
+/// surface, so neither covers the other.
+fn is_covered(
+    node: &state::ElementNode,
+    owner: &window::SnapshotWindow,
+    windows: &[window::SnapshotWindow],
+) -> bool {
+    let Some(hit) = window::root_window_at(node.center.0, node.center.1) else {
+        return false;
+    };
+    if hit == owner.handle || hit == window::root_window(owner.handle) {
+        return false;
+    }
+    !windows.iter().any(|candidate| {
+        candidate.handle == hit && candidate.pid != owner.pid && same_application(owner, candidate)
+    })
+}
+
+/// Whether a name carries something to read. Icon fonts (Segoe Fluent Icons,
+/// MDL2 Assets) draw glyphs from the Private Use Area, and a text element
+/// holding only such a glyph reads as `text ""`.
+fn has_readable_text(name: &str) -> bool {
+    name.chars()
+        .any(|c| !c.is_whitespace() && !('\u{E000}'..='\u{F8FF}').contains(&c))
+}
+
+/// A name on one line: a multi-line name ("Ln 1,\n Col 5") would otherwise
+/// break the tree it is printed in.
+fn display_name(name: &str) -> String {
+    name.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn format_tree_line(node: &state::ElementNode, action: &str) -> String {
     let actions = node
         .supported_actions
@@ -580,7 +621,7 @@ fn format_tree_line(node: &state::ElementNode, action: &str) -> String {
         node.center.0,
         node.center.1,
         node.control_type,
-        node.name,
+        display_name(&node.name),
         node.element_id,
         parent,
         actions
@@ -658,7 +699,10 @@ fn dedupe_stacked_nodes(nodes: &mut Vec<state::ElementNode>) {
 fn format_informative_line(node: &state::ElementNode) -> String {
     format!(
         "({},{}) {} \"{}\"",
-        node.center.0, node.center.1, node.control_type, node.name
+        node.center.0,
+        node.center.1,
+        node.control_type,
+        display_name(&node.name)
     )
 }
 
@@ -1001,11 +1045,15 @@ fn draw_label(image: &mut image::RgbaImage, x: i32, y: i32, index: usize, color:
 fn draw_annotations(
     image: &mut image::RgbaImage,
     nodes: &[state::ElementNode],
+    skips: &[bool],
     capture_left: i32,
     capture_top: i32,
     scale: f64,
 ) {
     for (index, node) in nodes.iter().enumerate() {
+        if skips.get(index).copied().unwrap_or(false) {
+            continue;
+        }
         let (left, top, right, bottom) = node.bounding_box;
         let x1 = (((left - capture_left) as f64) * scale).round() as i32;
         let y1 = (((top - capture_top) as f64) * scale).round() as i32;
@@ -1101,6 +1149,9 @@ fn capture_inner(
     // --- UIA tree walk ---
     let uia_start = Instant::now();
     let mut interactive_nodes: Vec<state::ElementNode> = Vec::new();
+    // Parallel to `interactive_nodes`: covered controls keep their label but
+    // get no box, which would otherwise be drawn over the window in front.
+    let mut annotation_skips: Vec<bool> = Vec::new();
     let mut scrollable_nodes: Vec<state::ElementNode> = Vec::new();
     let mut informative_nodes: Vec<state::ElementNode> = Vec::new();
     let mut value_text: Vec<(isize, String)> = Vec::new();
@@ -1129,7 +1180,9 @@ fn capture_inner(
             3
         };
         let walks = walk_scan_targets(&ordered, use_dom, collect_text, deadline, max_retries)?;
-        for (win, (walk, finished_late)) in ordered.into_iter().zip(walks) {
+        for (window_index, (win, (walk, finished_late))) in
+            ordered.into_iter().zip(walks).enumerate()
+        {
             let hwnd = HWND(win.handle as *mut _);
             let (root_raw, elements) = match walk {
                 WalkWindowResult::Success(result) => result,
@@ -1367,7 +1420,7 @@ fn capture_inner(
             }
 
             dedupe_stacked_nodes(&mut local_interactive);
-            local_informative.retain(|node| !node.name.trim().is_empty());
+            local_informative.retain(|node| has_readable_text(&node.name));
             dedupe_stacked_nodes(&mut local_informative);
             // Scrollable regions nest the same way interactive controls do —
             // Chromium stacks a legacy-bridge pane and its document at one
@@ -1376,6 +1429,24 @@ fn capture_inner(
             local_scrollable.retain(|node| !node.name.trim().is_empty());
             dedupe_stacked_nodes(&mut local_scrollable);
 
+            let covered = |node: &state::ElementNode| is_covered(node, win, &walk_windows);
+            let interactive_covered: Vec<bool> = local_interactive.iter().map(covered).collect();
+            let informative_covered: Vec<bool> = local_informative.iter().map(covered).collect();
+            let scrollable_covered: Vec<bool> = local_scrollable.iter().map(covered).collect();
+            // Another window of the same application that sits entirely behind
+            // the one asked about — a second Notepad window — only adds
+            // controls the caller cannot reach. A whole-desktop sweep keeps
+            // it: there the point is discovering what exists.
+            let entirely_covered = interactive_covered
+                .iter()
+                .chain(&informative_covered)
+                .chain(&scrollable_covered)
+                .all(|covered| *covered);
+            if window_index > 0 && scan_options.scope != SnapshotScope::All && entirely_covered {
+                window_element_base += element_count;
+                continue;
+            }
+
             if !local_interactive.is_empty()
                 || !local_scrollable.is_empty()
                 || !local_informative.is_empty()
@@ -1383,17 +1454,26 @@ fn capture_inner(
                 let mut children = Vec::with_capacity(
                     local_interactive.len() + local_scrollable.len() + local_informative.len(),
                 );
-                children.extend(
-                    local_interactive
-                        .iter()
-                        .map(|n| format_tree_line(n, "click")),
-                );
-                children.extend(local_informative.iter().map(format_informative_line));
-                children.extend(
-                    local_scrollable
-                        .iter()
-                        .map(|n| format_tree_line(n, "scroll")),
-                );
+                children.extend(local_interactive.iter().zip(&interactive_covered).map(
+                    |(n, covered)| {
+                        format_tree_line(n, if *covered { COVERED_ACTION } else { "click" })
+                    },
+                ));
+                children.extend(local_informative.iter().zip(&informative_covered).map(
+                    |(n, covered)| {
+                        let line = format_informative_line(n);
+                        if *covered {
+                            format!("{line}  [{COVERED_ACTION}]")
+                        } else {
+                            line
+                        }
+                    },
+                ));
+                children.extend(local_scrollable.iter().zip(&scrollable_covered).map(
+                    |(n, covered)| {
+                        format_tree_line(n, if *covered { COVERED_ACTION } else { "scroll" })
+                    },
+                ));
                 window_trees.push(WindowTree {
                     name: window_label,
                     children,
@@ -1401,6 +1481,7 @@ fn capture_inner(
             }
 
             interactive_nodes.extend(local_interactive);
+            annotation_skips.extend(interactive_covered);
             scrollable_nodes.extend(local_scrollable);
             informative_nodes.extend(local_informative);
             value_text.extend(local_values);
@@ -1416,6 +1497,9 @@ fn capture_inner(
     let mut backend_name: Option<&'static str> = None;
     let mut blank_capture = false;
     let mut region_text: Option<(String, String)> = None;
+    let mut image_capture_ms = 0.0;
+    let mut image_resize_ms = 0.0;
+    let mut image_encode_ms = 0.0;
 
     if use_vision {
         let (capture_rect, region) = match &display_indices {
@@ -1436,8 +1520,10 @@ fn capture_inner(
         };
         region_text = region;
 
+        let capture_start = Instant::now();
         let backend = capture::resolve_backend();
         let (captured, backend) = capture::capture_rect_with_backend(capture_rect, backend)?;
+        image_capture_ms = capture_start.elapsed().as_secs_f64() * 1000.0;
         backend_name = Some(backend.name());
         blank_capture = capture::is_blank(&captured);
 
@@ -1446,17 +1532,20 @@ fn capture_inner(
         let user_scale = screenshot::resolve_scale();
         let scale = screenshot::combined_scale(orig_width, orig_height, user_scale);
 
+        let resize_start = Instant::now();
         let mut image = if scale != 1.0 {
             let (w, h) = screenshot::scaled_size(orig_width, orig_height, scale);
             screenshot::resize_lanczos3(&captured, w.max(1), h.max(1))?
         } else {
             captured
         };
+        image_resize_ms = resize_start.elapsed().as_secs_f64() * 1000.0;
 
         if use_annotation {
             draw_annotations(
                 &mut image,
                 &interactive_nodes,
+                &annotation_skips,
                 capture_rect.left,
                 capture_rect.top,
                 scale,
@@ -1467,7 +1556,9 @@ fn capture_inner(
             screenshot::draw_grid_lines(&mut image, w, h);
         }
 
+        let encode_start = Instant::now();
         png_bytes = Some(screenshot::encode_png(&image)?);
+        image_encode_ms = encode_start.elapsed().as_secs_f64() * 1000.0;
 
         screenshot_size_line = Some(if scale < 1.0 {
             let coord_scale = (1.0 / scale * 1_000_000.0).round() / 1_000_000.0;
@@ -1629,7 +1720,7 @@ UI Tree Scan: completed in longer than timeout_ms={} — one window's           
 
     if profile {
         eprintln!(
-            "Snapshot tool profile: window_enum_ms={window_ms:.1} uia_scan_ms={uia_ms:.1} image_ms={image_ms:.1} total_ms={:.1}",
+            "Snapshot tool profile: window_enum_ms={window_ms:.1} uia_scan_ms={uia_ms:.1} image_ms={image_ms:.1} capture_ms={image_capture_ms:.1} resize_ms={image_resize_ms:.1} encode_ms={image_encode_ms:.1} total_ms={:.1}",
             total_start.elapsed().as_secs_f64() * 1000.0
         );
     }
@@ -1809,6 +1900,21 @@ mod tests {
     }
 
     #[test]
+    fn a_third_same_titled_application_is_ambiguous_after_a_frame_core_pair() {
+        let mut frame = snapshot_window(1, "Settings");
+        frame.class_name = "ApplicationFrameWindow".to_string();
+        let mut core = snapshot_window(2, "Settings");
+        core.class_name = "Windows.UI.Core.CoreWindow".to_string();
+        let windows = vec![frame, core, snapshot_window(3, "Settings")];
+
+        assert!(
+            find_window("Settings", &windows)
+                .unwrap_err()
+                .contains("ambiguous")
+        );
+    }
+
+    #[test]
     fn scan_options_default_to_foreground_and_two_seconds() {
         let options = ScanOptions::resolve(None, None, None).unwrap();
         assert_eq!(options.scope, SnapshotScope::Foreground);
@@ -1933,6 +2039,54 @@ mod tests {
     }
 
     #[test]
+    fn foreground_packaged_app_includes_only_its_own_core_window() {
+        let windows = vec![
+            window::SnapshotWindow::new(
+                1,
+                "電卓".to_string(),
+                "ApplicationFrameWindow".to_string(),
+                100,
+            ),
+            window::SnapshotWindow::new(
+                2,
+                "電卓".to_string(),
+                "Windows.UI.Core.CoreWindow".to_string(),
+                200,
+            ),
+            window::SnapshotWindow::new(
+                3,
+                "別のアプリ".to_string(),
+                "Windows.UI.Core.CoreWindow".to_string(),
+                300,
+            ),
+            window::SnapshotWindow::new(
+                4,
+                "別のアプリ".to_string(),
+                "ApplicationFrameWindow".to_string(),
+                100,
+            ),
+        ];
+        let foreground = window::WindowInfo {
+            handle: 1,
+            title: "電卓".to_string(),
+            pid: 100,
+        };
+        let selected = select_scan_targets(
+            &ScanOptions::resolve(None, None, None).unwrap(),
+            Some(&foreground),
+            &windows,
+        )
+        .unwrap();
+        assert_eq!(
+            selected
+                .iter()
+                .map(|window| window.handle)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+    }
+
+    #[test]
     fn window_query_selects_the_best_title_match() {
         let windows = vec![
             snapshot_window(1, "Claude"),
@@ -1994,6 +2148,20 @@ mod tests {
     #[test]
     fn tree_falls_back_when_empty() {
         assert_eq!(render_tree(&[]), "No elements found.");
+    }
+
+    #[test]
+    fn an_icon_glyph_alone_is_not_readable_text() {
+        assert!(!has_readable_text("\u{E711}"));
+        assert!(!has_readable_text(" \u{E710} "));
+        assert!(has_readable_text("\u{E711} Close"));
+        assert!(has_readable_text("7 文字"));
+    }
+
+    #[test]
+    fn a_multi_line_name_is_printed_on_one_line() {
+        assert_eq!(display_name("行 1,\n 列 609"), "行 1, 列 609");
+        assert_eq!(display_name(" Windows (CRLF)"), "Windows (CRLF)");
     }
 
     #[test]

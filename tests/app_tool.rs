@@ -8,11 +8,11 @@
 
 mod harness;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use harness::{TestApp, desktop_lock};
+use harness::{BUTTON_TEXT, TestApp, desktop_lock};
 
-use windows_operation_cli::params::ListOrString;
+use windows_operation_cli::params::{BoolOrString, ListOrString};
 use windows_operation_cli::tools::app::{AppMode, AppParams, app};
 use windows_operation_cli::window;
 
@@ -142,6 +142,7 @@ fn switch_brings_the_named_window_forward() {
 
     let response = app(AppParams {
         name: Some("App Switch First".to_string()),
+        snapshot: Some(BoolOrString::Bool(true)),
         ..params(AppMode::Switch)
     })
     .expect("switch failed");
@@ -149,12 +150,70 @@ fn switch_brings_the_named_window_forward() {
         !response.contains("not found"),
         "the window was not found: {response}"
     );
+    assert!(
+        response.contains("UI Tree:") && response.contains(BUTTON_TEXT),
+        "{response}"
+    );
 
     assert!(
         first.wait_until(Duration::from_secs(5), || {
             window::foreground_window().is_some_and(|w| w.handle == first.hwnd())
         }),
         "switch did not bring the first window forward"
+    );
+}
+
+#[test]
+#[ignore = "requires an interactive Windows desktop session; run with --ignored"]
+fn ambiguous_switch_does_not_capture_an_unrelated_window() {
+    let _desktop = desktop_lock();
+    let Some(_first) = launch_app("App Duplicate") else {
+        return;
+    };
+    let Some(second) = launch_app("App Duplicate") else {
+        return;
+    };
+
+    let response = app(AppParams {
+        name: Some("App Duplicate".to_string()),
+        snapshot: Some(BoolOrString::Bool(true)),
+        ..params(AppMode::Switch)
+    })
+    .expect("switch returned an unexpected error");
+    assert!(response.contains("ambiguous"), "{response}");
+    assert!(!response.contains("UI Tree:"), "{response}");
+    assert_eq!(
+        window::foreground_window().map(|window| window.handle),
+        Some(second.hwnd())
+    );
+}
+
+#[test]
+#[ignore = "timing-sensitive; requires an interactive Windows desktop session"]
+fn repeated_switch_with_snapshot_latency() {
+    let _desktop = desktop_lock();
+    let Some(_harness) = launch_app("App Switch Timing") else {
+        return;
+    };
+    let call = || {
+        app(AppParams {
+            name: Some("App Switch Timing".to_string()),
+            snapshot: Some(BoolOrString::Bool(true)),
+            ..params(AppMode::Switch)
+        })
+    };
+    call().expect("warm-up switch failed");
+    let mut times = Vec::with_capacity(10);
+    for _ in 0..10 {
+        let start = Instant::now();
+        let response = call().expect("switch failed");
+        times.push(start.elapsed().as_secs_f64() * 1000.0);
+        assert!(response.contains(BUTTON_TEXT), "{response}");
+    }
+    times.sort_by(f64::total_cmp);
+    eprintln!(
+        "App switch+Snapshot median={:.1}ms p90={:.1}ms",
+        times[5], times[8]
     );
 }
 

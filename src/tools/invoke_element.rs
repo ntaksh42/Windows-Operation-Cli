@@ -150,7 +150,6 @@ const MAX_REPORTED_TEXT: usize = 15;
 fn text_change_report(owner: isize, seen: Vec<String>) -> String {
     let deadline = Instant::now() + TEXT_CHANGE_TIMEOUT;
     let new_text = loop {
-        std::thread::sleep(TEXT_CHANGE_INTERVAL);
         let result = match snapshot::capture_window_for_polling(owner) {
             Ok(result) => result,
             Err(error) => {
@@ -172,6 +171,9 @@ fn text_change_report(owner: isize, seen: Vec<String>) -> String {
         if !new_text.is_empty() || Instant::now() >= deadline {
             break new_text;
         }
+        std::thread::sleep(
+            TEXT_CHANGE_INTERVAL.min(deadline.saturating_duration_since(Instant::now())),
+        );
     };
     if new_text.is_empty() {
         return "Window text: no change since the last Snapshot.".to_string();

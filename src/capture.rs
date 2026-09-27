@@ -156,9 +156,9 @@ pub fn capture_rect_with_backend(
 
 /// Whether a capture came back with essentially nothing in it.
 ///
-/// A real desktop always lights up most of its pixels — even a dark theme
-/// sits well above zero. Sampling every 64th pixel keeps this at a fraction
-/// of a millisecond on a 4K frame while still being decisive.
+/// A failed capture is nearly black. A real desktop can be mostly black
+/// with only a small window visible, so a 1% lit threshold distinguishes
+/// that from stray pixels in a bad frame. Sampling keeps this cheap on 4K.
 pub fn is_blank(image: &image::RgbaImage) -> bool {
     const STRIDE: usize = 64;
     let raw = image.as_raw();
@@ -166,11 +166,11 @@ pub fn is_blank(image: &image::RgbaImage) -> bool {
     let mut lit = 0u32;
     for pixel in raw.chunks_exact(4).step_by(STRIDE) {
         sampled += 1;
-        if pixel[0] as u32 + pixel[1] as u32 + pixel[2] as u32 > 0 {
+        if pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0 {
             lit += 1;
         }
     }
-    sampled > 0 && lit * 2 < sampled
+    sampled > 0 && lit * 100 < sampled
 }
 
 fn capture_gdi_image(rect: RECT, width: i32, height: i32) -> Result<image::RgbaImage, String> {
@@ -681,13 +681,19 @@ mod tests {
 
     #[test]
     fn a_mostly_black_frame_with_some_content_is_not_blank() {
-        // A window on an unlit desktop still counts as a real capture once
-        // more than half the sampled pixels carry colour.
+        // A small window on an unlit desktop is still a real capture.
         let mut image = image::RgbaImage::from_pixel(256, 256, image::Rgba([0, 0, 0, 255]));
-        for (_, _, pixel) in image.enumerate_pixels_mut().filter(|(_, y, _)| *y > 100) {
+        for (_, _, pixel) in image.enumerate_pixels_mut().filter(|(_, y, _)| *y < 16) {
             *pixel = image::Rgba([40, 40, 40, 255]);
         }
         assert!(!is_blank(&image));
+    }
+
+    #[test]
+    fn a_bad_frame_with_a_lit_pixel_is_still_blank() {
+        let mut image = image::RgbaImage::from_pixel(256, 256, image::Rgba([0, 0, 0, 255]));
+        image.put_pixel(0, 0, image::Rgba([255, 255, 255, 255]));
+        assert!(is_blank(&image));
     }
 
     #[test]

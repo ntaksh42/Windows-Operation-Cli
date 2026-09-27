@@ -299,13 +299,48 @@ pub fn is_point_occluded(x: i32, y: i32, owner_handle: isize) -> bool {
     }
 }
 
-/// Finds the best fuzzy-name match (score_cutoff 70) among currently open windows.
-pub fn find_by_name(name: &str) -> Option<WindowInfo> {
-    let windows = list_windows();
-    let titles: Vec<&str> = windows.iter().map(|w| w.title.as_str()).collect();
-    let (matched_title, _) = crate::fuzzy::extract_one(name, titles, 70.0)?;
-    let matched_title = matched_title.to_string();
-    windows.into_iter().find(|w| w.title == matched_title)
+/// Finds one fuzzy-name match, refusing to act when equally good windows exist.
+pub fn find_by_name(name: &str) -> Result<Option<WindowInfo>, String> {
+    find_in_windows_by_name(name, &list_windows()).map(|window| window.cloned())
+}
+
+fn find_in_windows_by_name<'a>(
+    name: &str,
+    windows: &'a [WindowInfo],
+) -> Result<Option<&'a WindowInfo>, String> {
+    let query = name.to_lowercase();
+    let query_len = query.chars().count();
+    let mut best: Option<(&WindowInfo, f64, f64)> = None;
+    let mut ambiguous = false;
+    for window in windows {
+        let title = window.title.to_lowercase();
+        let whole = crate::fuzzy::ratio(&query, &title);
+        let score = if query_len <= title.chars().count() {
+            whole.max(crate::fuzzy::partial_ratio(&query, &title))
+        } else {
+            whole
+        };
+        if score < 70.0 {
+            continue;
+        }
+        match best {
+            None => best = Some((window, score, whole)),
+            Some((_, best_score, best_whole))
+                if score > best_score || (score == best_score && whole > best_whole) =>
+            {
+                best = Some((window, score, whole));
+                ambiguous = false;
+            }
+            Some((_, best_score, best_whole)) if score == best_score && whole == best_whole => {
+                ambiguous = true;
+            }
+            _ => {}
+        }
+    }
+    if ambiguous {
+        return Err(format!("Window query is ambiguous: {name}"));
+    }
+    Ok(best.map(|(window, _, _)| window))
 }
 
 /// Returns the current foreground (active) top-level window, if any.
@@ -438,6 +473,12 @@ pub fn switch_to(handle: isize) {
     }
 }
 
+/// The top-level window a click at `(x, y)` would reach, if any.
+pub fn root_window_at(x: i32, y: i32) -> Option<isize> {
+    let hit = unsafe { WindowFromPoint(POINT { x, y }) };
+    (!hit.0.is_null()).then(|| root_window(hit.0 as isize))
+}
+
 /// The top-level window `handle` now belongs to — itself, unless it has been
 /// reparented since it was seen. A packaged app's `CoreWindow` is briefly
 /// top-level while the app starts, then moves inside its
@@ -511,3 +552,49 @@ pub fn wait_for_window(
 // owns. The tests that lived here derived their geometry from whatever window
 // happened to be in the foreground and returned early when there was none, so
 // they asserted nothing on a headless CI runner while still reporting success.
+#[cfg(test)]
+mod name_match_tests {
+    use super::*;
+
+    fn candidate(handle: isize, title: &str) -> WindowInfo {
+        WindowInfo {
+            handle,
+            title: title.to_string(),
+            pid: handle as u32,
+        }
+    }
+
+    #[test]
+    fn equally_good_windows_are_ambiguous() {
+        let windows = [candidate(1, "Gmail - Edge"), candidate(2, "Gmail - Edge")];
+        assert!(
+            find_in_windows_by_name("Gmail", &windows)
+                .unwrap_err()
+                .contains("ambiguous")
+        );
+    }
+
+    #[test]
+    fn an_exact_name_beats_a_longer_partial_match() {
+        let windows = [candidate(1, "Untitled - Paint"), candidate(2, "Paint")];
+        assert_eq!(
+            find_in_windows_by_name("Paint", &windows)
+                .unwrap()
+                .unwrap()
+                .handle,
+            2
+        );
+    }
+
+    #[test]
+    fn a_shorter_title_does_not_steal_a_longer_query() {
+        let windows = [candidate(1, "Claude"), candidate(2, "Claude Settings")];
+        assert_eq!(
+            find_in_windows_by_name("Claude Settings", &windows)
+                .unwrap()
+                .unwrap()
+                .handle,
+            2
+        );
+    }
+}

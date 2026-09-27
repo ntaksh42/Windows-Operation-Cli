@@ -62,12 +62,13 @@ InvokeElement(element_ids=[id_8, id_multiply, id_9, id_equals])
 ```
 
 Every tool call is a full model round trip, which costs far more than the tool itself. Batch actions (`element_ids`, `MultiEdit`, `MultiSelect`), ask `App` for its `snapshot`, and read the result from `InvokeElement`'s text report instead of taking another Snapshot or Screenshot just to confirm.
+When changed text is not needed, set `InvokeElement(report_text=false)` to skip its up-to-400ms text polling; verify the intended state with `WaitFor` or a fresh observation when necessary.
 
 Fill a form with several fields: `MultiEdit(labels=[[label, text], ...])` instead of repeated Type calls. Select multiple files/items: `MultiSelect`.
 
 `Click` and `Scroll` take a `modifier` (`shift`/`ctrl`/`alt`/`win`) held down for the duration of the action — use it for ctrl+click multi-select or ctrl+wheel zoom instead of composing `Shortcut` with a separate click, which races. `Click` also accepts `clicks=3` for a triple-click (select-line).
 
-Text entry details for `Type`: `clear=true` replaces existing content, `press_enter=true` submits, `caret_position` is `start`/`end`/`idle`. Text of 20+ characters containing none of `\n`, `\t`, `{`, `}` is pasted via clipboard automatically (fast); anything else is sent keystroke by keystroke.
+Text entry details for `Type`: `clear=true` replaces existing content, `press_enter=true` submits, `caret_position` is `start`/`end`/`idle`. Text of 20+ UTF-8 bytes containing none of `\n`, `\t`, `\r` is pasted via clipboard automatically (fast); anything else is sent keystroke by keystroke.
 
 ## Full parameter reference
 

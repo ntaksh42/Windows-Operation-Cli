@@ -8,7 +8,7 @@
 
 mod harness;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use harness::{TestApp, desktop_lock};
 use windows_operation_cli::capture::{Backend, capture_rect_with_backend};
@@ -86,6 +86,26 @@ fn consecutive_screenshots_are_all_real() {
             lit * 100.0
         );
     }
+}
+
+#[test]
+#[ignore = "timing-sensitive; requires an interactive Windows desktop session"]
+fn repeated_screenshot_latency() {
+    for _ in 0..3 {
+        screenshot(&params()).expect("warm-up screenshot failed");
+    }
+    let mut times = Vec::with_capacity(20);
+    for _ in 0..20 {
+        let start = Instant::now();
+        let output = screenshot(&params()).expect("screenshot failed");
+        times.push(start.elapsed().as_secs_f64() * 1000.0);
+        assert!(lit_fraction(&output.png_bytes) > 0.5);
+    }
+    times.sort_by(f64::total_cmp);
+    eprintln!(
+        "Screenshot median={:.1}ms p90={:.1}ms",
+        times[10], times[17]
+    );
 }
 
 /// Restricting to a display has to produce that display's region, and say so.
