@@ -18,6 +18,7 @@ use crate::params::{BoolOrString, opt_bool};
 const MAX_READ_SIZE: u64 = 10 * 1024 * 1024;
 /// Maximum number of entries returned by `list`/`search` before truncation.
 const MAX_RESULTS: usize = 500;
+const MAX_SCAN_ENTRIES: usize = 100_000;
 
 /// Parameters for the `FileSystem` tool.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -196,6 +197,10 @@ fn sensitive_files_allowed() -> bool {
 }
 
 fn is_sensitive_path(path: &Path) -> bool {
+    sensitive_name(path) || fs::canonicalize(path).is_ok_and(|resolved| sensitive_name(&resolved))
+}
+
+fn sensitive_name(path: &Path) -> bool {
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -271,7 +276,7 @@ fn read_file(
         );
     }
 
-    let bytes = match fs::read(path) {
+    let bytes = match read_bounded_file(path) {
         Ok(b) => b,
         Err(e) => return read_error(&e, path),
     };
@@ -317,7 +322,7 @@ fn edit_file(
     if !path.is_file() {
         return format!("Error: File not found: {}", path.display());
     }
-    let bytes = match fs::read(path) {
+    let bytes = match read_bounded_file(path) {
         Ok(bytes) => bytes,
         Err(error) => return read_error(&error, path),
     };
@@ -327,7 +332,11 @@ fn edit_file(
             with_commas(bytes.len() as u64)
         );
     }
-    let text = decode_text(&bytes, encoding);
+    let (actual_encoding, bom_len) = encoding_rs::Encoding::for_bom(&bytes).unwrap_or((encoding, 0));
+    let text = match decode_text_checked(&bytes[bom_len..], actual_encoding) {
+        Ok(text) => text,
+        Err(error) => return format!("Error: {error}; file was not edited."),
+    };
     let count = text.match_indices(old_text).count();
     if count == 0 {
         let closest = closest_line(&text, old_text)
@@ -345,8 +354,13 @@ fn edit_file(
         );
     }
     let updated = text.replacen(old_text, new_text, 1);
-    let encoded = encode_text(&updated, encoding);
-    match fs::write(path, encoded.as_ref()) {
+    let encoded = match encode_text_checked(&updated, actual_encoding) {
+        Ok(bytes) => bytes,
+        Err(error) => return format!("Error: {error}; file was not edited."),
+    };
+    let mut output = bytes[..bom_len].to_vec();
+    output.extend_from_slice(encoded.as_ref());
+    match fs::write(path, output) {
         Ok(()) => format!("Edited {} (1 replacement)", path.display()),
         Err(error) => write_error(&error, path),
     }
@@ -403,7 +417,10 @@ fn write_file(
         return write_error(&e, path);
     }
 
-    let encoded = encode_text(content, encoding);
+    let encoded = match encode_text_checked(content, encoding) {
+        Ok(bytes) => bytes,
+        Err(error) => return format!("Error: {error}; file was not written."),
+    };
     let result = if append {
         fs::OpenOptions::new()
             .create(true)
@@ -441,16 +458,32 @@ fn decode_text(bytes: &[u8], encoding: &'static encoding_rs::Encoding) -> String
     }
 }
 
-fn encode_text<'a>(
-    content: &'a str,
-    encoding: &'static encoding_rs::Encoding,
-) -> std::borrow::Cow<'a, [u8]> {
-    if encoding == encoding_rs::UTF_16LE {
-        std::borrow::Cow::Owned(content.encode_utf16().flat_map(u16::to_le_bytes).collect())
-    } else if encoding == encoding_rs::UTF_16BE {
-        std::borrow::Cow::Owned(content.encode_utf16().flat_map(u16::to_be_bytes).collect())
+fn decode_text_checked(bytes: &[u8], encoding: &'static encoding_rs::Encoding) -> Result<String, String> {
+    if encoding == encoding_rs::UTF_16LE || encoding == encoding_rs::UTF_16BE {
+        if !bytes.len().is_multiple_of(2) {
+            return Err("Invalid UTF-16 byte length".to_string());
+        }
+        let units: Vec<u16> = bytes.chunks_exact(2).map(|pair| {
+            if encoding == encoding_rs::UTF_16LE { u16::from_le_bytes([pair[0], pair[1]]) }
+            else { u16::from_be_bytes([pair[0], pair[1]]) }
+        }).collect();
+        String::from_utf16(&units).map_err(|error| format!("Invalid UTF-16: {error}"))
     } else {
-        encoding.encode(content).0
+        let (text, errors) = encoding.decode_without_bom_handling(bytes);
+        if errors { Err(format!("Invalid bytes for {}", encoding.name())) }
+        else { Ok(text.into_owned()) }
+    }
+}
+
+fn encode_text_checked<'a>(content: &'a str, encoding: &'static encoding_rs::Encoding) -> Result<std::borrow::Cow<'a, [u8]>, String> {
+    if encoding == encoding_rs::UTF_16LE {
+        Ok(std::borrow::Cow::Owned(content.encode_utf16().flat_map(u16::to_le_bytes).collect()))
+    } else if encoding == encoding_rs::UTF_16BE {
+        Ok(std::borrow::Cow::Owned(content.encode_utf16().flat_map(u16::to_be_bytes).collect()))
+    } else {
+        let (bytes, _, errors) = encoding.encode(content);
+        if errors { Err(format!("Text cannot be represented in {}", encoding.name())) }
+        else { Ok(bytes) }
     }
 }
 
@@ -466,40 +499,107 @@ fn write_error(e: &io::Error, path: &Path) -> String {
     }
 }
 
+fn comparable_path(path: &Path) -> io::Result<PathBuf> {
+    let absolute = std::path::absolute(path)?;
+    let mut ancestor = absolute.as_path();
+    let mut suffix = Vec::new();
+    while !ancestor.exists() {
+        suffix.push(ancestor.file_name().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Invalid destination path"))?.to_os_string());
+        ancestor = ancestor.parent().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "No existing path ancestor"))?;
+    }
+    let mut resolved = fs::canonicalize(ancestor)?;
+    for component in suffix.into_iter().rev() {
+        resolved.push(component);
+    }
+    Ok(PathBuf::from(resolved.to_string_lossy().to_lowercase()))
+}
+
+fn validate_transfer(src: &Path, dst: &Path) -> io::Result<()> {
+    let source = comparable_path(src)?;
+    let destination = comparable_path(dst)?;
+    if source == destination
+        || source.starts_with(&destination)
+        || (src.is_dir() && destination.starts_with(&source))
+        || (dst.exists() && same_file::is_same_file(src, dst)?)
+    {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Source and destination must not be the same path or contain one another"));
+    }
+    Ok(())
+}
+
+/// An exclusively created sibling directory owns temporary copies and backups.
+struct TransferStage(PathBuf);
+
+impl TransferStage {
+    fn new(destination: &Path) -> io::Result<Self> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let parent = destination.parent().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Destination has no parent"))?;
+        fs::create_dir_all(parent)?;
+        loop {
+            let path = parent.join(format!(".woc-transfer-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+            match fs::create_dir(&path) {
+                Ok(()) => return Ok(Self(path)),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+}
+
+impl Drop for TransferStage {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn replace_destination(source: &Path, destination: &Path, overwrite: bool) -> io::Result<()> {
+    if destination.exists() && !overwrite {
+        return Err(io::Error::new(io::ErrorKind::AlreadyExists, "Destination already exists; set overwrite=True to replace"));
+    }
+    if !destination.exists() || (source.is_file() && destination.is_file()) {
+        return fs::rename(source, destination);
+    }
+    let backup = TransferStage::new(destination)?;
+    let saved = backup.0.join("previous");
+    fs::rename(destination, &saved)?;
+    if let Err(error) = fs::rename(source, destination) {
+        if let Err(restore) = fs::rename(&saved, destination) {
+            // Preserve the only remaining original if rollback itself fails.
+            let location = saved.display().to_string();
+            std::mem::forget(backup);
+            return Err(io::Error::other(format!("{error}; rollback failed: {restore}; original retained at {location}")));
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
 fn copy_path(src: &Path, dst: &Path, overwrite: bool) -> String {
     if !src.exists() {
         return format!("Error: Source not found: {}", src.display());
     }
-    if dst.exists() && !overwrite {
-        return format!(
-            "Error: Destination already exists: {}. Set overwrite=True to replace.",
-            dst.display()
-        );
+    if let Err(error) = validate_transfer(src, dst) {
+        return copy_error(&error);
     }
-
-    if src.is_file() {
-        if let Some(parent) = dst.parent()
-            && let Err(e) = fs::create_dir_all(parent)
-        {
-            return copy_error(&e);
+    if dst.exists() && !overwrite {
+        return format!("Error: Destination already exists: {}. Set overwrite=True to replace.", dst.display());
+    }
+    let result = (|| {
+        let stage = TransferStage::new(dst)?;
+        let staged = stage.0.join("new");
+        if src.is_dir() {
+            copy_dir_recursive(src, &staged)?;
+        } else if src.is_file() {
+            copy_file(src, &staged)?;
+        } else {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Unsupported file type"));
         }
-        match copy_file(src, dst) {
-            Ok(()) => format!("Copied file: {} -> {}", src.display(), dst.display()),
-            Err(e) => copy_error(&e),
-        }
-    } else if src.is_dir() {
-        if dst.exists()
-            && overwrite
-            && let Err(e) = fs::remove_dir_all(dst)
-        {
-            return copy_error(&e);
-        }
-        match copy_dir_recursive(src, dst) {
-            Ok(()) => format!("Copied directory: {} -> {}", src.display(), dst.display()),
-            Err(e) => copy_error(&e),
-        }
-    } else {
-        format!("Error: Unsupported file type: {}", src.display())
+        replace_destination(&staged, dst, overwrite)
+    })();
+    match result {
+        Ok(()) => format!("Copied {}: {} -> {}", if src.is_dir() { "directory" } else { "file" }, src.display(), dst.display()),
+        Err(error) => copy_error(&error),
     }
 }
 
@@ -539,42 +639,30 @@ fn move_path(src: &Path, dst: &Path, overwrite: bool) -> String {
     if !src.exists() {
         return format!("Error: Source not found: {}", src.display());
     }
-    if dst.exists() && !overwrite {
-        return format!(
-            "Error: Destination already exists: {}. Set overwrite=True to replace.",
-            dst.display()
-        );
+    if let Err(error) = validate_transfer(src, dst) {
+        return move_error(&error);
     }
-
-    if let Some(parent) = dst.parent()
-        && let Err(e) = fs::create_dir_all(parent)
-    {
-        return move_error(&e);
-    }
-    if dst.exists() && overwrite {
-        let remove_result = if dst.is_dir() {
-            fs::remove_dir_all(dst)
-        } else {
-            fs::remove_file(dst)
-        };
-        if let Err(e) = remove_result {
-            return move_error(&e);
+    let result = (|| {
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent)?;
         }
-    }
-
-    // fs::rename fails across drives/volumes on Windows; fall back to a
-    // copy-then-delete, mirroring Python's shutil.move.
-    let result = fs::rename(src, dst).or_else(|_| {
-        if src.is_dir() {
-            copy_dir_recursive(src, dst).and_then(|()| fs::remove_dir_all(src))
-        } else {
-            copy_file(src, dst).and_then(|()| fs::remove_file(src))
+        match replace_destination(src, dst, overwrite) {
+            Ok(()) => Ok(()),
+            // ERROR_NOT_SAME_DEVICE: only cross-volume moves use copy/delete.
+            Err(error) if error.raw_os_error() == Some(17) => {
+                let stage = TransferStage::new(dst)?;
+                let staged = stage.0.join("new");
+                if src.is_dir() { copy_dir_recursive(src, &staged)?; }
+                else { copy_file(src, &staged)?; }
+                replace_destination(&staged, dst, overwrite)?;
+                if src.is_dir() { fs::remove_dir_all(src) } else { fs::remove_file(src) }
+            }
+            Err(error) => Err(error),
         }
-    });
-
+    })();
     match result {
         Ok(()) => format!("Moved: {} -> {}", src.display(), dst.display()),
-        Err(e) => move_error(&e),
+        Err(error) => move_error(&error),
     }
 }
 
@@ -599,8 +687,9 @@ fn delete_path(path: &Path, recursive: bool, dry_run: bool) -> String {
     if dry_run {
         let mut targets = vec![path.to_path_buf()];
         if meta.is_dir() && recursive {
-            match walk(path, true) {
-                Ok(entries) => targets.extend(entries.into_iter().map(|(path, _)| path)),
+            match walk(path, true, false) {
+                Ok(walked) if walked.skipped == 0 && !walked.truncated => targets.extend(walked.entries.into_iter().map(|(path, _)| path)),
+                Ok(_) => return "Error: Delete preview could not enumerate every target; nothing was removed.".to_string(),
                 Err(error) => return delete_error(&error, path),
             }
         }
@@ -703,10 +792,12 @@ fn list_directory(
         return format!("Error: Path is not a directory: {}", path.display());
     }
 
-    let mut raw = match walk(path, recursive) {
+    let walked = match walk(path, recursive, !show_hidden) {
         Ok(v) => v,
         Err(e) => return list_error(&e, path),
     };
+    let notice = walked.notice();
+    let mut raw = walked.entries;
     raw.retain(|(entry_path, _)| {
         let name = entry_path
             .file_name()
@@ -730,7 +821,7 @@ fn list_directory(
         let filter_msg = pattern
             .map(|p| format!(" matching \"{p}\""))
             .unwrap_or_default();
-        return format!("Directory {} is empty{filter_msg}.", path.display());
+        return format!("Directory {} is empty{filter_msg}.{notice}", path.display());
     }
 
     let mut lines = Vec::new();
@@ -771,7 +862,7 @@ fn list_directory(
     if let Some(p) = pattern {
         header.push_str(&format!(" (filter: {p})"));
     }
-    format!("{header}\n{}", lines.join("\n"))
+    format!("{header}\n{}{notice}", lines.join("\n"))
 }
 
 fn list_error(e: &io::Error, path: &Path) -> String {
@@ -800,10 +891,12 @@ fn search_files(
         return format!("Error: Search path is not a directory: {}", path.display());
     }
 
-    let mut raw = match walk(path, recursive) {
+    let walked = match walk(path, recursive, false) {
         Ok(v) => v,
         Err(e) => return search_error(&e, path),
     };
+    let notice = walked.notice();
+    let mut raw = walked.entries;
     raw.retain(|(entry_path, _)| {
         let name = entry_path
             .file_name()
@@ -824,11 +917,17 @@ fn search_files(
         };
         let mut matches = Vec::new();
         let mut total = 0usize;
+        let mut skipped = 0usize;
         for (entry_path, is_dir) in raw {
             if is_dir {
                 continue;
             }
-            let Ok(bytes) = fs::read(&entry_path) else {
+            if !sensitive_files_allowed() && is_sensitive_path(&entry_path) {
+                skipped += 1;
+                continue;
+            }
+            let Ok(bytes) = read_bounded_file(&entry_path) else {
+                skipped += 1;
                 continue;
             };
             let text = decode_text(&bytes, encoding);
@@ -836,24 +935,29 @@ fn search_files(
                 if regex.is_match(line) {
                     total += 1;
                     if matches.len() < MAX_RESULTS {
-                        matches.push(format!("{}:{}: {}", entry_path.display(), index + 1, line));
+                        let preview: String = line.chars().take(1000).collect();
+                        let suffix = if preview.len() < line.len() { " [line truncated]" } else { "" };
+                        matches.push(format!("{}:{}: {preview}{suffix}", entry_path.display(), index + 1));
                     }
                 }
             }
         }
+        let skipped_notice = if skipped > 0 {
+            format!("\nSkipped {skipped} file(s): sensitive, too large, or unreadable.")
+        } else { String::new() };
         if total == 0 {
             return format!(
-                "No content matches found for /{content_pattern}/ in files matching \"{pattern}\""
+                "No content matches found for /{content_pattern}/ in files matching \"{pattern}\"{notice}{skipped_notice}"
             );
         }
         if total > MAX_RESULTS {
             matches.push(format!("... (truncated, {MAX_RESULTS}+ matches)"));
         }
-        return matches.join("\n");
+        return format!("{}{notice}{skipped_notice}", matches.join("\n"));
     }
 
     if raw.is_empty() {
-        return format!("No matches found for \"{pattern}\" in {}", path.display());
+        return format!("No matches found for \"{pattern}\" in {}{notice}", path.display());
     }
 
     let total = raw.len();
@@ -883,7 +987,7 @@ fn search_files(
     }
 
     format!(
-        "Search: \"{pattern}\" in {} ({} matches)\n{}",
+        "Search: \"{pattern}\" in {} ({} matches)\n{}{notice}",
         path.display(),
         total.min(MAX_RESULTS),
         lines.join("\n")
@@ -904,20 +1008,52 @@ fn search_error(e: &io::Error, path: &Path) -> String {
 
 /// Walks `dir`, returning `(path, is_dir)` for every entry. Recurses into
 /// subdirectories when `recursive` is set.
-fn walk(dir: &Path, recursive: bool) -> io::Result<Vec<(PathBuf, bool)>> {
-    let mut results = Vec::new();
+struct WalkResult {
+    entries: Vec<(PathBuf, bool)>,
+    skipped: usize,
+    truncated: bool,
+}
+
+impl WalkResult {
+    fn notice(&self) -> String {
+        let mut notice = String::new();
+        if self.skipped > 0 { notice += &format!("\nSkipped {} unreadable entries or directories.", self.skipped); }
+        if self.truncated { notice += &format!("\nScan truncated at {MAX_SCAN_ENTRIES} entries."); }
+        notice
+    }
+}
+
+fn walk(dir: &Path, recursive: bool, skip_dot_dirs: bool) -> io::Result<WalkResult> {
+    let mut result = WalkResult { entries: Vec::new(), skipped: 0, truncated: false };
     let mut stack = vec![dir.to_path_buf()];
-    while let Some(current) = stack.pop() {
-        for entry in fs::read_dir(&current)? {
-            let entry = entry?;
-            let is_dir = entry.file_type()?.is_dir();
-            results.push((entry.path(), is_dir));
-            if recursive && is_dir {
-                stack.push(entry.path());
-            }
+    'scan: while let Some(current) = stack.pop() {
+        let entries = match fs::read_dir(&current) {
+            Ok(entries) => entries,
+            Err(error) if current == dir => return Err(error),
+            Err(_) => { result.skipped += 1; continue; }
+        };
+        for entry in entries {
+            if result.entries.len() >= MAX_SCAN_ENTRIES { result.truncated = true; break 'scan; }
+            let entry = match entry { Ok(entry) => entry, Err(_) => { result.skipped += 1; continue; } };
+            let file_type = match entry.file_type() { Ok(kind) => kind, Err(_) => { result.skipped += 1; continue; } };
+            let is_dir = file_type.is_dir();
+            let hidden_dir = skip_dot_dirs && is_dir && entry.file_name().to_string_lossy().starts_with('.');
+            result.entries.push((entry.path(), is_dir));
+            if recursive && is_dir && !hidden_dir { stack.push(entry.path()); }
         }
     }
-    Ok(results)
+    Ok(result)
+}
+
+fn read_bounded_file(path: &Path) -> io::Result<Vec<u8>> {
+    use std::io::Read;
+    let file = fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    file.take(MAX_READ_SIZE + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_READ_SIZE {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "File too large (maximum 10 MiB)"));
+    }
+    Ok(bytes)
 }
 
 fn get_file_info(path: &Path) -> String {

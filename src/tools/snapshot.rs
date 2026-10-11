@@ -337,6 +337,7 @@ struct WindowTree {
 /// (0.5s, 1s, 2s — docs/SPEC.md "Snapshot 性能設計"). Returns `None` if the
 /// window never succeeds, matching the Python reference's
 /// `failed_handles`: that window silently contributes nothing.
+#[allow(clippy::large_enum_variant)] // short-lived result; avoid an allocation on each window walk
 enum WalkWindowResult {
     Success((uia::RawElement, Vec<uia::RawElement>)),
     Failed,
@@ -1083,6 +1084,25 @@ pub fn capture(params: &SnapshotParams) -> Result<SnapshotResult, String> {
     capture_inner(params, true, None)
 }
 
+/// Validate caller input separately from failures reading a live desktop.
+pub fn validate_params(params: &SnapshotParams) -> Result<(), String> {
+    ScanOptions::resolve(params.scope, params.window.clone(), params.timeout_ms)?;
+    opt_bool(&params.use_vision, false)?;
+    opt_bool(&params.use_annotation, true)?;
+    let use_dom = opt_bool(&params.use_dom, false)?;
+    let use_ui_tree = opt_bool(&params.use_ui_tree, true)?;
+    if use_dom && !use_ui_tree {
+        return Err("use_dom=true requires use_ui_tree=true".to_string());
+    }
+    if let Some(indices) = &params.display {
+        let indices = indices.clone().into_list()?;
+        if let Some(index) = indices.iter().find(|&&index| index < 0) {
+            return Err(format!("Invalid display index {index}"));
+        }
+    }
+    Ok(())
+}
+
 /// A capture for a caller that reads the element lists rather than the
 /// rendered response — `WaitFor`, polling several times a second. Skips the
 /// table, tree and desktop-listing formatting, which that caller discards.
@@ -1159,6 +1179,7 @@ fn capture_inner(
     let mut dom_scroll_percent = 0.0;
     let mut window_trees: Vec<WindowTree> = Vec::new();
     let mut uia_truncated = false;
+    let mut ia2_truncated = false;
     // Set when a window's own scan carried the capture past `timeout_ms`.
     let mut overran_budget = false;
     let mut window_element_base = 0usize;
@@ -1372,8 +1393,10 @@ fn capture_inner(
             if use_dom
                 && win.is_firefox()
                 && dom_root.is_none()
-                && let Ok(ia2_result) = ia2::walk_firefox(hwnd)
-                && ia2_result.dom_bounds.as_ref().is_some_and(|bounds| {
+                && let Ok(ia2_result) = ia2::walk_firefox_with_deadline(hwnd, deadline)
+            {
+                ia2_truncated |= ia2_result.truncated;
+                if ia2_result.dom_bounds.as_ref().is_some_and(|bounds| {
                     selected_rect
                         .as_ref()
                         .is_none_or(|region| rects_intersect(bounds, region))
@@ -1416,6 +1439,7 @@ fn capture_inner(
                     } else {
                         local_informative.push(node);
                     }
+                }
                 }
             }
 
@@ -1696,6 +1720,9 @@ fn capture_inner(
                 "\nUI Tree Scan: truncated at timeout_ms={}",
                 scan_options.timeout.as_millis()
             );
+        }
+        if ia2_truncated {
+            text += "\nFirefox DOM Scan: truncated at the deadline, 5000 visits, or depth 128.";
         }
         if overran_budget && !uia_truncated {
             text += &format!(

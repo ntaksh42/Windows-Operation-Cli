@@ -5,7 +5,7 @@ use rmcp::schemars;
 use serde::Deserialize;
 
 use crate::params::ListOrString;
-use crate::tools::support::resolve_labels_checked;
+use crate::tools::support::InputTarget;
 use crate::tools::typing::{self, CaretPosition};
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -33,23 +33,29 @@ pub fn multi_edit(params: MultiEditParams) -> Result<String, String> {
         return Err("Either locs or labels must be provided.".to_string());
     }
 
-    let mut entries: Vec<(i32, i32, String)> = Vec::new();
+    let mut entries: Vec<(InputTarget, String)> = Vec::new();
     if let Some(locs) = params.locs {
-        entries.extend(locs.into_list()?);
+        entries.extend(locs.into_list()?.into_iter().map(|(x, y, text)| (InputTarget::Point(x, y), text)));
     }
     if let Some(labels) = params.labels {
         let labels = labels.into_list()?;
-        let label_ids: Vec<i64> = labels.iter().map(|(label, _)| *label).collect();
-        let coords = resolve_labels_checked(&label_ids)?;
-        for ((x, y), (_, text)) in coords.into_iter().zip(labels) {
-            entries.push((x, y, text));
+        let total = entries.len() + labels.len();
+        for (label, text) in labels {
+            let target = InputTarget::from_label(label).map_err(|error| format!("Completed 0 of {total} edits: {error}"))?;
+            entries.push((target, text));
         }
     }
     if entries.is_empty() {
         return Err("At least one loc or label entry must be provided.".to_string());
     }
 
-    for (index, &(x, y, ref text)) in entries.iter().enumerate() {
+    let total = entries.len();
+    for (target, _) in &entries {
+        target.resolve().map_err(|error| format!("Completed 0 of {total} edits: {error}"))?;
+    }
+    let _overlay = crate::overlay::InputOverlay::show();
+    let mut elements = Vec::new();
+    for (index, (target, text)) in entries.iter().enumerate() {
         if index > 0 {
             // `SendInput` queues keystrokes; it does not wait for the target
             // to consume them. Moving to the next field immediately clicked
@@ -60,12 +66,23 @@ pub fn multi_edit(params: MultiEditParams) -> Result<String, String> {
             // before taking focus somewhere else.
             std::thread::sleep(field_settle_delay());
         }
-        typing::type_at(x, y, text, CaretPosition::Idle, true, false)?;
+        let (x, y) = target.resolve().map_err(|error| format!("Completed {index} of {total} edits: {error}"))?;
+        let warning = typing::type_at_report(x, y, text, CaretPosition::Idle, true, false)
+            .map_err(|error| format!("Completed {index} of {total} edits; current field may be partially modified: {error}"))?;
+        elements.push(format!("({x},{y}) with text '{text}'{}", warning.map(|warning| format!(" ({warning})")).unwrap_or_default()));
     }
 
-    let elements: Vec<String> = entries
-        .iter()
-        .map(|(x, y, text)| format!("({x},{y}) with text '{text}'"))
-        .collect();
     Ok(format!("Multi-edited elements at: {}", elements.join(", ")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn invalid_batch_reports_zero_completed_before_any_input() {
+        let result = multi_edit(MultiEditParams {
+            locs: None, labels: Some(ListOrString::List(vec![(-1, "a".into()), (-2, "b".into())])),
+        });
+        assert!(result.unwrap_err().contains("Completed 0 of 2"));
+    }
 }

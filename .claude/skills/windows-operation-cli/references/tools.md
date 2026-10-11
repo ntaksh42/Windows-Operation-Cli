@@ -69,7 +69,7 @@ UI accessibility tree with element ids and semantic actions.
 |---|---|---|---|
 | scope | "foreground" \| "all" | foreground | `all` = whole-desktop discovery |
 | window | string? | null | fuzzy title match for one app; incompatible with scope=all |
-| timeout_ms | int | 2000 | 100-30000; on expiry returns partial tree marked truncated |
+| timeout_ms | int | 2000 | 100-30000; soft scan budget; slow provider calls may overrun it; partial trees are marked truncated |
 | use_vision | bool | false | adds annotated screenshot |
 | use_dom | bool | false | browser DOM extraction (Chrome/Edge/Firefox); requires use_ui_tree=true |
 | use_ui_tree | bool | true | |
@@ -126,7 +126,7 @@ Re-resolves each element by RuntimeId within its owning window and executes the 
 | caret_position | start \| idle \| end | idle | |
 | press_enter | bool | false | |
 
-Text of 20+ UTF-8 bytes containing none of `\n`, `\t`, `\r` is pasted via clipboard (original clipboard restored); otherwise sent per keystroke. `\n` becomes Enter, `\t` becomes Tab.
+Text of 20+ UTF-8 bytes containing none of `\n`, `\t`, `\r` uses clipboard paste only when the clipboard has no non-text formats; otherwise it is sent per keystroke. The prior text is restored unless another application changed the clipboard. Partial paste delivery returns an error without resending; unverifiable delivery returns a warning. `\n` becomes Enter, `\t` becomes Tab.
 
 ### Scroll
 
@@ -219,11 +219,13 @@ Mixing parameters across modes is an error. `launch` resolves the name via Start
 | param | type | default |
 |---|---|---|
 | command | string | required |
-| timeout | int seconds | 30 |
+| timeout | int seconds | 30 (clamped to 0–3600) |
 
-Response is always `Response: {output}\nStatus Code: {code}`. Runs with -NoProfile, cwd = user home, UTF-8 output. On timeout the process tree is killed and status code 1 returned.
+Response is always `Response: {output}\nStatus Code: {code}`. Runs with -NoProfile, cwd = user home, UTF-8 output. On timeout the process tree is killed and status code 1 returned. Each output stream retains at most 1 MiB; omitted output is marked. Failed commands include both stdout and stderr.
 
 ### FileSystem
+
+Copy/move reject identical paths, hard-link aliases, and overlapping directory trees. Copies are staged before replacing an existing destination. Edit preserves BOMs and refuses invalid decoding or unmappable output characters. Recursive scans stop at 100,000 entries and report unreadable/truncated scans; content search skips sensitive, unreadable, and >10 MiB files. Matching lines are limited to 1,000 characters.
 
 | param | type | default | notes |
 |---|---|---|---|

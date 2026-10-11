@@ -16,6 +16,7 @@ use crate::tools::snapshot::{self, SnapshotParams};
 
 const MAX_REDIRECTS: usize = 5;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_BODY_BYTES: usize = 5 * 1024 * 1024;
 
 /// Parameters for the `Scrape` tool.
 ///
@@ -62,7 +63,12 @@ pub async fn scrape(
         && let Some(sampled) =
             sample_content(peer, &params.url, params.query.as_deref(), &content).await
     {
-        return Ok(format!("URL: {}\nContent:\n{sampled}", params.url));
+        let source = if use_dom {
+            format!("{}\n", content.lines().next().unwrap_or_default())
+        } else {
+            String::new()
+        };
+        return Ok(format!("URL: {}\n{source}Content:\n{sampled}", params.url));
     }
 
     Ok(format!("URL: {}\nContent:\n{content}", params.url))
@@ -107,7 +113,12 @@ async fn scrape_dom(url: &str) -> Result<(String, bool), String> {
     } else {
         "Scroll down to see more"
     };
-    Ok((format!("{header}\n{text}\n{footer}"), true))
+    let source = dom_source_notice(result.focused_window_title.as_deref());
+    Ok((format!("{source}\n{header}\n{text}\n{footer}"), true))
+}
+
+fn dom_source_notice(title: Option<&str>) -> String {
+    format!("Source: foreground window {:?} (DOM; requested URL not verified)", title.unwrap_or("unknown"))
 }
 
 async fn sample_content(
@@ -187,17 +198,31 @@ async fn fetch_markdown(url: &str) -> Result<String, String> {
         break;
     }
 
-    let response =
+    let mut response =
         response.ok_or_else(|| "Error: Too many redirects while fetching URL".to_string())?;
     let status = response.status();
     if !status.is_success() {
         return Err(format!("Error: HTTP error for {current}: {status}"));
     }
 
-    let html = response
-        .text()
-        .await
-        .map_err(|e| format!("Error: Failed to read response body from {current}: {e}"))?;
+    if response.content_length().is_some_and(|length| length > MAX_BODY_BYTES as u64) {
+        return Err("Error: Response body exceeds the 5 MiB limit".to_string());
+    }
+    let content_type = response.headers().get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok()).unwrap_or("").to_string();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await
+        .map_err(|e| format!("Error: Failed to read response body from {current}: {e}"))? {
+        if bytes.len().saturating_add(chunk.len()) > MAX_BODY_BYTES {
+            return Err("Error: Response body exceeds the 5 MiB limit".to_string());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let encoding = content_type.split(';').skip(1).find_map(|parameter| {
+        let (name, value) = parameter.trim().split_once('=')?;
+        name.eq_ignore_ascii_case("charset").then(|| encoding_rs::Encoding::for_label(value.trim().trim_matches(['\'', '"']).as_bytes())).flatten()
+    }).unwrap_or(encoding_rs::UTF_8);
+    let html = encoding.decode(&bytes).0;
     let converter = htmd::HtmlToMarkdown::builder()
         .skip_tags(vec!["script", "style"])
         .build();
@@ -289,6 +314,13 @@ fn is_blocked_ip(ip: IpAddr) -> bool {
 mod tests {
     use super::*;
     use std::net::{Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn dom_source_does_not_claim_the_requested_url_was_verified() {
+        let notice = dom_source_notice(Some("Browser title"));
+        assert!(notice.contains("Browser title"));
+        assert!(notice.contains("requested URL not verified"));
+    }
 
     #[test]
     fn blocks_private_ipv4() {

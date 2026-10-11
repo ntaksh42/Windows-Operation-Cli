@@ -81,12 +81,23 @@ pub fn resolve_label_checked(label: i64) -> Result<(i32, i32), String> {
     validate_element_point(&resolve_label_value(label)?)
 }
 
-/// Resolves multiple labels to coordinates in bulk.
-pub fn resolve_labels_checked(labels: &[i64]) -> Result<Vec<(i32, i32)>, String> {
-    labels
-        .iter()
-        .map(|&label| resolve_label_value(label).and_then(|node| validate_element_point(&node)))
-        .collect()
+/// Keep an element's identity until each batch action is about to run.
+pub enum InputTarget {
+    Point(i32, i32),
+    Element(Box<state::ElementNode>),
+}
+
+impl InputTarget {
+    pub fn from_label(label: i64) -> Result<Self, String> {
+        Ok(Self::Element(Box::new(resolve_label_value(label)?)))
+    }
+
+    pub fn resolve(&self) -> Result<(i32, i32), String> {
+        match self {
+            Self::Point(x, y) => Ok((*x, *y)),
+            Self::Element(node) => validate_element_point(node),
+        }
+    }
 }
 
 /// Converts an optional `loc` param into `Option<Vec<i32>>`, resolving the

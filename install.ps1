@@ -84,7 +84,11 @@ $exeSource = $searchRoots |
     Where-Object { Test-Path $_ } |
     Select-Object -First 1
 
-if (-not $exeSource -and -not ($SkipBuild -or $FromRelease)) {
+# A checkout always rebuilds so a stale target\release exe is never installed.
+# An unpacked release archive has no Cargo.toml and reuses the exe next to it.
+$mustBuild = -not ($SkipBuild -or $FromRelease) -and (Test-Path (Join-Path $repoRoot 'Cargo.toml'))
+
+if ($mustBuild) {
     if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
         throw 'cargo not found. Install Rust (https://rustup.rs), or rerun with -FromRelease to download a prebuilt binary instead.'
     }

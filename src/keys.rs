@@ -120,6 +120,10 @@ fn named_vk(name: &str) -> Option<u16> {
 /// the active keyboard layout. Everything else goes through the alias table
 /// and then the named-key table.
 pub fn resolve_key(token: &str) -> Result<u16, String> {
+    resolve_key_parts(token).map(|(key, _)| key)
+}
+
+fn resolve_key_parts(token: &str) -> Result<(u16, Vec<u16>), String> {
     let trimmed = token.trim();
     if trimmed.is_empty() {
         return Err("Shortcut key must not be empty".to_string());
@@ -129,23 +133,52 @@ pub fn resolve_key(token: &str) -> Result<u16, String> {
     let first = chars.next().unwrap();
     if chars.next().is_none() {
         if first.is_ascii_alphanumeric() {
-            return Ok(first.to_ascii_uppercase() as u16);
+            return Ok((first.to_ascii_uppercase() as u16, Vec::new()));
+        }
+        if first as u32 > u16::MAX as u32 {
+            return Err(format!("Unknown shortcut key: {token:?}"));
         }
         let scan = unsafe { VkKeyScanW(first as u16) };
         if scan != -1 {
-            return Ok((scan as u16) & 0xFF);
+            return Ok(decode_scan(scan));
         }
         return Err(format!("Unknown shortcut key: {token:?}"));
     }
 
     let lower = trimmed.to_ascii_lowercase();
     let upper = alias(&lower).to_ascii_uppercase();
-    named_vk(&upper).ok_or_else(|| format!("Unknown shortcut key: {token:?}"))
+    named_vk(&upper).map(|key| (key, Vec::new())).ok_or_else(|| format!("Unknown shortcut key: {token:?}"))
+}
+
+fn decode_scan(scan: i16) -> (u16, Vec<u16>) {
+    let scan = scan as u16;
+    let mut modifiers = Vec::new();
+    for (bit, key) in [(1, 0x10), (2, 0x11), (4, 0x12)] {
+        if (scan >> 8) & bit != 0 { modifiers.push(key); }
+    }
+    (scan & 0xFF, modifiers)
+}
+
+pub fn resolve_chord(shortcut: &str) -> Result<Vec<u16>, String> {
+    let parts: Vec<_> = shortcut.split('+').map(resolve_key_parts).collect::<Result<_, _>>()?;
+    let mut keys = Vec::new();
+    for key in parts.iter().flat_map(|(_, modifiers)| modifiers.iter().copied()).chain(parts.iter().map(|(key, _)| *key)) {
+        if !keys.contains(&key) { keys.push(key); }
+    }
+    Ok(keys)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn symbol_scan_codes_keep_all_required_modifiers() {
+        assert_eq!(decode_scan(0x073f), (0x3f, vec![0x10, 0x11, 0x12]));
+        assert_eq!(decode_scan(0x013f), (0x3f, vec![0x10]));
+        assert!(resolve_chord("ctrl+\u{1F600}").is_err());
+        assert_eq!(resolve_chord("ctrl+ctrl+c").unwrap(), vec![0x11, b'C' as u16]);
+    }
 
     #[test]
     fn resolves_single_char_letters_and_digits() {

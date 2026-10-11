@@ -21,16 +21,25 @@ jobs:
     runs-on: windows-latest
 
     steps:
+    # Checking out the requested tag makes a missing tag fail here, before any
+    # build, instead of publishing a release from whatever the default ref is.
     - uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.inputs.tag || github.ref }}
 
     - name: Resolve tag
       id: tag
       shell: pwsh
+      env:
+        REQUESTED_TAG: ${{ github.event.inputs.tag }}
       run: |
-        $tag = if ($env:GITHUB_REF -like 'refs/tags/*') {
-          $env:GITHUB_REF -replace '^refs/tags/', ''
+        $tag = if (-not [string]::IsNullOrWhiteSpace($env:REQUESTED_TAG)) {
+          $env:REQUESTED_TAG
         } else {
-          '${{ github.event.inputs.tag }}'
+          $env:GITHUB_REF -replace '^refs/tags/', ''
+        }
+        if ([string]::IsNullOrWhiteSpace($tag) -or $tag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$') {
+          throw "Tag '$tag' is not a release tag such as v1.2.3."
         }
         "tag=$tag" >> $env:GITHUB_OUTPUT
 

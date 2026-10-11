@@ -84,8 +84,9 @@ pub fn type_text(params: TypeParams) -> Result<String, String> {
     let press_enter = opt_bool(&params.press_enter, false)?;
     let caret_position = params.caret_position.unwrap_or(CaretPosition::Idle);
 
-    type_at(x, y, &params.text, caret_position, clear, press_enter)?;
-    Ok(format!("Typed {} at ({x},{y}).", params.text))
+    let warning = type_at_report(x, y, &params.text, caret_position, clear, press_enter)?;
+    let warning = warning.map(|warning| format!("\n{warning}")).unwrap_or_default();
+    Ok(format!("Typed {} at ({x},{y}).{warning}", params.text))
 }
 
 /// Core typing sequence shared by the `Type` tool and `MultiEdit`: focus via
@@ -98,6 +99,12 @@ pub fn type_at(
     clear: bool,
     press_enter: bool,
 ) -> Result<(), String> {
+    type_at_report(x, y, text, caret_position, clear, press_enter).map(|_| ())
+}
+
+pub(crate) fn type_at_report(
+    x: i32, y: i32, text: &str, caret_position: CaretPosition, clear: bool, press_enter: bool,
+) -> Result<Option<&'static str>, String> {
     input_sim::click_once(x, y, MouseButton::Left, input_sim::input_settle_delay())?;
 
     match caret_position {
@@ -110,15 +117,21 @@ pub fn type_at(
         clear_focused_text()?;
     }
 
-    let pasted = should_paste(text) && paste_text(text)?;
-    if !pasted {
-        input_sim::type_text_char_by_char(text, TYPE_INTERVAL, KEY_WAIT)?;
-    }
+    let outcome = if should_paste(text) { paste_text(text)? } else { PasteOutcome::NotLanded };
+    let warning = match outcome {
+        PasteOutcome::Landed => None,
+        PasteOutcome::NotLanded => {
+            input_sim::type_text_char_by_char(text, TYPE_INTERVAL, KEY_WAIT)?;
+            None
+        }
+        PasteOutcome::Partial => return Err("Paste was only partially confirmed; text was not resent to avoid duplication.".to_string()),
+        PasteOutcome::Unverified => Some("Input warning: paste delivery could not be verified; text was not resent."),
+    };
 
     if press_enter {
         input_sim::key_tap(VK_RETURN.0, KEY_WAIT)?;
     }
-    Ok(())
+    Ok(warning)
 }
 
 /// Empties the focused control before new text is typed into it.
@@ -143,78 +156,56 @@ fn clear_focused_text() -> Result<(), String> {
 const PASTE_CONFIRM_TIMEOUT: Duration = Duration::from_millis(400);
 const PASTE_CONFIRM_INTERVAL: Duration = Duration::from_millis(25);
 
-/// Stashes `text` on the clipboard, pastes via Ctrl+V, confirms the paste
-/// landed, then restores the prior clipboard contents.
-///
-/// Returns `Ok(false)` when the paste could not be confirmed, so the caller
-/// falls back to sending the text character by character. A fixed sleep was
-/// not enough on its own: the clipboard is restored right after, and a target
-/// that reads it late — an Electron app, a remote desktop — pasted the
-/// *restored* contents or nothing at all, and the tool still reported success.
-fn paste_text(text: &str) -> Result<bool, String> {
-    let prior = input_sim::get_clipboard_text();
-    if !input_sim::set_clipboard_text(text) {
-        return Ok(false);
-    }
-    // Read the target before pasting so an unchanged value afterwards is
-    // distinguishable from one that happens to look similar.
+#[derive(Debug, PartialEq, Eq)]
+enum PasteOutcome { Landed, NotLanded, Partial, Unverified }
+
+fn paste_text(text: &str) -> Result<PasteOutcome, String> {
     let before = crate::uia::focused_element_value();
+    let Some(clipboard) = input_sim::PasteClipboard::prepare(text)? else { return Ok(PasteOutcome::NotLanded); };
     std::thread::sleep(PASTE_SETTLE_WAIT);
     let paste_result = input_sim::chord(&[VK_CONTROL.0, b'V' as u16], KEY_WAIT);
-    let landed = paste_result.is_ok() && wait_for_pasted_text(text, before.as_deref());
-    match prior {
-        Some(prior) => {
-            input_sim::set_clipboard_text(&prior);
-        }
-        None => input_sim::clear_clipboard(),
-    }
+    let outcome = if paste_result.is_ok() {
+        wait_for_pasted_text(text, before.as_deref(), PASTE_CONFIRM_TIMEOUT, crate::uia::focused_element_value)
+    } else { PasteOutcome::Unverified };
+    let restored = clipboard.finish();
     paste_result?;
-    Ok(landed)
+    restored?;
+    Ok(outcome)
 }
 
-/// Polls the focused control for `text` until it shows up or the timeout
-/// passes.
-///
-/// Only a control that still holds `before` — visibly unchanged — is reported
-/// as not pasted. Anything else counts as landed, including a control that
-/// exposes no readable value at all. Retyping is only safe when nothing
-/// arrived: a paste that half-landed would otherwise be spliced together with
-/// a full retype, which is worse than the silent failure this guards against.
-fn wait_for_pasted_text(text: &str, before: Option<&str>) -> bool {
-    let deadline = std::time::Instant::now() + PASTE_CONFIRM_TIMEOUT;
+fn wait_for_pasted_text(
+    text: &str, before: Option<&str>, timeout: Duration,
+    mut read_value: impl FnMut() -> Option<String>,
+) -> PasteOutcome {
+    let deadline = std::time::Instant::now() + timeout;
+    let previous_count = before.map_or(0, |value| value.matches(text).count());
     let mut changed = false;
     loop {
-        match crate::uia::focused_element_value() {
-            // The whole text is there: done.
-            Some(value) if value.contains(text) => return true,
-            // Nothing readable to compare against; assume the paste worked
-            // rather than risk typing the text a second time.
-            None => return true,
-            // Something arrived but not all of it yet. A paste is not atomic
-            // from the reader's side — a long string is observable partway
-            // through — so treating "it changed" as "it finished" would
-            // confirm at whatever the first poll happened to catch, and the
-            // caller would be told the whole text landed. Keep waiting, and
-            // remember that it started.
-            Some(value) => {
-                if Some(value.as_str()) != before {
-                    changed = true;
-                }
-            }
-        }
+        let Some(value) = read_value() else { return PasteOutcome::Unverified; };
+        if value.matches(text).count() > previous_count { return PasteOutcome::Landed; }
+        changed |= Some(value.as_str()) != before;
         if std::time::Instant::now() >= deadline {
-            // Out of time. Report success only if nothing arrived at all —
-            // then the caller can safely type it instead. A half-delivered
-            // paste must not be retyped on top of itself.
-            return changed;
+            return if changed { PasteOutcome::Partial }
+                else if previous_count > 0 || before.is_none() { PasteOutcome::Unverified }
+                else { PasteOutcome::NotLanded };
         }
-        std::thread::sleep(PASTE_CONFIRM_INTERVAL);
+        std::thread::sleep(PASTE_CONFIRM_INTERVAL.min(deadline.saturating_duration_since(std::time::Instant::now())));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paste_confirmation_does_not_trust_existing_or_partial_text() {
+        let poll = |before, value: Option<&str>| wait_for_pasted_text("hello", before, Duration::ZERO, || value.map(str::to_string));
+        assert_eq!(poll(Some("hello"), Some("hello")), PasteOutcome::Unverified);
+        assert_eq!(poll(Some("hello"), Some("hellohello")), PasteOutcome::Landed);
+        assert_eq!(poll(Some(""), Some("he")), PasteOutcome::Partial);
+        assert_eq!(poll(Some(""), Some("")), PasteOutcome::NotLanded);
+        assert_eq!(poll(Some(""), None), PasteOutcome::Unverified);
+    }
 
     #[test]
     fn japanese_text_reaches_the_paste_path() {

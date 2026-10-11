@@ -412,7 +412,7 @@ pub fn resize_window(
     unsafe {
         MoveWindow(HWND(handle as *mut _), x, y, w, h, true).map_err(|e| e.to_string())?;
     }
-    Ok((x, y, w, h))
+    window_rect(handle).ok_or_else(|| "Failed to read resized window bounds.".to_string())
 }
 
 /// Brings `handle` to the foreground, matching the Python reference's

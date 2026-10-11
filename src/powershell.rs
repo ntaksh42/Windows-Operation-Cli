@@ -22,6 +22,7 @@ use windows_registry::{CURRENT_USER, LOCAL_MACHINE, Type};
 const GRACE_PERIOD: Duration = Duration::from_secs(2);
 /// Poll interval while waiting for process exit / pipe drain.
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
+const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 
 const FALLBACK_PATHEXT: &str =
     ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC;.CPL;.PY;.PYW";
@@ -122,6 +123,7 @@ pub fn execute_command(
     timeout_secs: u64,
     shell_override: Option<&str>,
 ) -> (String, i32) {
+    let timeout_secs = timeout_secs.min(3600);
     let shell = shell_override
         .map(str::to_string)
         .unwrap_or_else(pick_shell);
@@ -186,8 +188,8 @@ pub fn execute_command(
     let status = pending.status.expect("status set once wait_until succeeds");
     let stdout = String::from_utf8_lossy(&pending.stdout.unwrap_or_default()).into_owned();
     let stderr = String::from_utf8_lossy(&pending.stderr.unwrap_or_default()).into_owned();
-    let mut output = if !stdout.is_empty() { stdout } else { stderr };
     let code = status.code().unwrap_or(1);
+    let mut output = combine_output(stdout, stderr, code);
 
     if code != 0 && output.contains("Access is denied") && !crate::win::is_elevated() {
         output.push_str(
@@ -250,11 +252,42 @@ impl PendingResult {
 fn spawn_reader(mut pipe: impl Read + Send + 'static) -> Receiver<Vec<u8>> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = pipe.read_to_end(&mut buf);
+        let buf = read_capped(&mut pipe, MAX_OUTPUT_BYTES);
         let _ = tx.send(buf);
     });
     rx
+}
+
+fn combine_output(stdout: String, stderr: String, code: i32) -> String {
+    if stdout.is_empty() {
+        stderr
+    } else if code != 0 && !stderr.is_empty() {
+        format!("{stdout}\n{stderr}")
+    } else {
+        stdout
+    }
+}
+
+/// Keep draining both pipes so the child never blocks on a full output buffer.
+fn read_capped(reader: &mut impl Read, cap: usize) -> Vec<u8> {
+    let mut output = Vec::new();
+    let mut chunk = [0; 8192];
+    let mut truncated = false;
+    loop {
+        let count = match reader.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(count) => count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        };
+        let keep = count.min(cap.saturating_sub(output.len()));
+        output.extend_from_slice(&chunk[..keep]);
+        truncated |= keep < count;
+    }
+    if truncated {
+        output.extend_from_slice(b"\n[output truncated]\n");
+    }
+    output
 }
 
 /// What every shell runs: read the base64 UTF-8 command from stdin, then run
@@ -493,6 +526,21 @@ fn win32_user_name() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_commands_keep_stdout_and_stderr() {
+        assert_eq!(combine_output("ok".into(), "boom".into(), 1), "ok\nboom");
+        assert_eq!(combine_output("ok".into(), "warning".into(), 0), "ok");
+    }
+
+    #[test]
+    fn output_is_bounded_but_the_reader_is_drained() {
+        let mut input = std::io::Cursor::new(vec![b'x'; 20000]);
+        let output = read_capped(&mut input, 32);
+        assert_eq!(input.position(), 20000);
+        assert_eq!(&output[..32], &[b'x'; 32]);
+        assert!(output.ends_with(b"[output truncated]\n"));
+    }
 
     #[test]
     fn encoded_command_round_trips() {

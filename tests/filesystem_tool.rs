@@ -74,7 +74,6 @@ fn assert_ok(response: &str, what: &str) {
 }
 
 #[test]
-#[ignore = "writes under the system temp directory; run with --ignored"]
 fn written_text_reads_back_verbatim() {
     let scratch = Scratch::new("write");
     let path = scratch.join("note.txt");
@@ -93,7 +92,6 @@ fn written_text_reads_back_verbatim() {
 
 /// `append` has to add to the file, not replace it.
 #[test]
-#[ignore = "writes under the system temp directory; run with --ignored"]
 fn appending_keeps_what_was_there() {
     let scratch = Scratch::new("append");
     let path = scratch.write("log.txt", "first\n");
@@ -111,7 +109,6 @@ fn appending_keeps_what_was_there() {
 
 /// `offset`/`limit` select a window of lines rather than the whole file.
 #[test]
-#[ignore = "writes under the system temp directory; run with --ignored"]
 fn reading_a_range_returns_only_those_lines() {
     let scratch = Scratch::new("range");
     let body: String = (1..=10).map(|n| format!("line {n}\n")).collect();
@@ -132,7 +129,6 @@ fn reading_a_range_returns_only_those_lines() {
 
 /// A non-UTF-8 encoding has to be honoured on the way in and out.
 #[test]
-#[ignore = "writes under the system temp directory; run with --ignored"]
 fn a_shift_jis_file_round_trips() {
     let scratch = Scratch::new("sjis");
     let path = scratch.join("sjis.txt");
@@ -163,7 +159,6 @@ fn a_shift_jis_file_round_trips() {
 
 /// `edit` replaces one exact occurrence and leaves the rest alone.
 #[test]
-#[ignore = "writes under the system temp directory; run with --ignored"]
 fn editing_replaces_the_named_text() {
     let scratch = Scratch::new("edit");
     let path = scratch.write("config.txt", "host = localhost\nport = 8080\n");
@@ -182,7 +177,6 @@ fn editing_replaces_the_named_text() {
 /// Text that appears twice is ambiguous: replacing one at random would be a
 /// silent wrong answer.
 #[test]
-#[ignore = "writes under the system temp directory; run with --ignored"]
 fn editing_ambiguous_text_is_refused() {
     let scratch = Scratch::new("ambiguous");
     let path = scratch.write("dup.txt", "value\nvalue\n");
@@ -205,7 +199,6 @@ fn editing_ambiguous_text_is_refused() {
 
 /// Copy leaves the source in place; move does not.
 #[test]
-#[ignore = "writes under the system temp directory; run with --ignored"]
 fn copy_keeps_the_source_and_move_does_not() {
     let scratch = Scratch::new("copymove");
     let source = scratch.write("source.txt", "payload");
@@ -231,7 +224,6 @@ fn copy_keeps_the_source_and_move_does_not() {
 
 /// Overwriting an existing destination needs saying so.
 #[test]
-#[ignore = "writes under the system temp directory; run with --ignored"]
 fn copying_onto_an_existing_file_needs_overwrite() {
     let scratch = Scratch::new("overwrite");
     let source = scratch.write("from.txt", "new");
@@ -262,7 +254,6 @@ fn copying_onto_an_existing_file_needs_overwrite() {
 
 /// `dry_run` reports what would go without removing it.
 #[test]
-#[ignore = "writes under the system temp directory; run with --ignored"]
 fn a_dry_run_delete_removes_nothing() {
     let scratch = Scratch::new("dryrun");
     let path = scratch.write("doomed.txt", "still here");
@@ -285,7 +276,6 @@ fn a_dry_run_delete_removes_nothing() {
 /// `list` shows what is in the directory; `search` narrows by glob and by
 /// content.
 #[test]
-#[ignore = "writes under the system temp directory; run with --ignored"]
 fn list_and_search_find_the_right_files() {
     let scratch = Scratch::new("listing");
     scratch.write("alpha.txt", "needle in here");
@@ -324,7 +314,6 @@ fn list_and_search_find_the_right_files() {
 
 /// A path that does not exist is a caller-facing error, not a panic.
 #[test]
-#[ignore = "reads the filesystem; run with --ignored"]
 fn a_missing_path_is_reported() {
     let scratch = Scratch::new("missing");
     let response = file_system(params(FileSystemMode::Read, &scratch.join("nothing.txt")));
@@ -336,7 +325,6 @@ fn a_missing_path_is_reported() {
 
 /// `info` describes the file rather than returning its contents.
 #[test]
-#[ignore = "writes under the system temp directory; run with --ignored"]
 fn info_describes_the_file() {
     let scratch = Scratch::new("info");
     let path = scratch.write("sized.txt", "0123456789");
@@ -347,4 +335,170 @@ fn info_describes_the_file() {
         response.contains("10") || response.to_lowercase().contains("byte"),
         "info did not report a size: {response}"
     );
+}
+
+
+#[test]
+fn overlapping_transfer_paths_leave_the_source_untouched() {
+    let scratch = Scratch::new("overlap");
+    let directory = scratch.0.join("tree");
+    std::fs::create_dir_all(&directory).unwrap();
+    let file = directory.join("keep.txt");
+    std::fs::write(&file, "original").unwrap();
+    for mode in [FileSystemMode::Copy, FileSystemMode::Move] {
+        for (source, destination) in [
+            (file.clone(), file.clone()),
+            (directory.clone(), directory.clone()),
+            (directory.clone(), directory.join("child")),
+            (directory.clone(), scratch.0.clone()),
+        ] {
+            let mut request = params(mode, &source.to_string_lossy());
+            request.destination = Some(destination.to_string_lossy().into_owned());
+            request.overwrite = Some(BoolOrString::Bool(true));
+            let result = file_system(request);
+            assert!(result.starts_with("Error"), "{result}");
+            assert_eq!(std::fs::read_to_string(&file).unwrap(), "original");
+            assert!(!directory.join("child").exists());
+        }
+    }
+}
+
+#[test]
+fn hard_link_transfer_is_refused_without_truncation() {
+    let scratch = Scratch::new("hard-link");
+    let source = scratch.write("source.txt", "keep");
+    let alias = scratch.join("alias.txt");
+    std::fs::hard_link(&source, &alias).unwrap();
+    for mode in [FileSystemMode::Copy, FileSystemMode::Move] {
+        let mut request = params(mode, &source);
+        request.destination = Some(alias.clone());
+        request.overwrite = Some(BoolOrString::Bool(true));
+        assert!(file_system(request).starts_with("Error"));
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), "keep");
+        assert_eq!(std::fs::read_to_string(&alias).unwrap(), "keep");
+    }
+}
+
+#[test]
+fn failed_overwrite_preserves_existing_destination() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let scratch = Scratch::new("failed-overwrite");
+    let source = scratch.0.join("source");
+    let destination = scratch.0.join("destination");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::create_dir_all(&destination).unwrap();
+    std::fs::write(source.join("locked.txt"), "new").unwrap();
+    std::fs::write(destination.join("old.txt"), "old").unwrap();
+    let locked = std::fs::OpenOptions::new().read(true).share_mode(0).open(source.join("locked.txt")).unwrap();
+    let mut request = params(FileSystemMode::Copy, &source.to_string_lossy());
+    request.destination = Some(destination.to_string_lossy().into_owned());
+    request.overwrite = Some(BoolOrString::Bool(true));
+    let result = file_system(request);
+    assert!(result.starts_with("Error"), "{result}");
+    assert_eq!(std::fs::read_to_string(destination.join("old.txt")).unwrap(), "old");
+    assert!(!destination.join("locked.txt").exists());
+    drop(locked);
+    assert_ok(&file_system({
+        let mut request = params(FileSystemMode::Copy, &source.to_string_lossy());
+        request.destination = Some(destination.to_string_lossy().into_owned());
+        request.overwrite = Some(BoolOrString::Bool(true));
+        request
+    }), "replace directory");
+    assert!(!destination.join("old.txt").exists());
+    assert_eq!(std::fs::read_to_string(destination.join("locked.txt")).unwrap(), "new");
+}
+
+#[test]
+fn a_failed_move_keeps_both_original_files() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let scratch = Scratch::new("failed-move");
+    let source = scratch.write("source.txt", "source");
+    let destination = scratch.write("destination.txt", "destination");
+    let locked = std::fs::OpenOptions::new().read(true).share_mode(0).open(&source).unwrap();
+    let mut request = params(FileSystemMode::Move, &source);
+    request.destination = Some(destination.clone());
+    request.overwrite = Some(BoolOrString::Bool(true));
+    assert!(file_system(request).starts_with("Error"));
+    drop(locked);
+    assert_eq!(std::fs::read_to_string(source).unwrap(), "source");
+    assert_eq!(std::fs::read_to_string(destination).unwrap(), "destination");
+}
+
+#[test]
+fn invalid_decoding_or_encoding_never_changes_existing_bytes() {
+    let scratch = Scratch::new("encoding-errors");
+    let path = scratch.join("legacy.txt");
+    let original = [0x82, 0xa0, b' ', b'x'];
+    std::fs::write(&path, original).unwrap();
+    let mut edit = params(FileSystemMode::Edit, &path);
+    edit.old_text = Some("x".into());
+    edit.new_text = Some("y".into());
+    assert!(file_system(edit).starts_with("Error"));
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    let mut write = params(FileSystemMode::Write, &path);
+    write.encoding = "shift_jis".into();
+    write.content = Some("\u{1F600}".into());
+    assert!(file_system(write).starts_with("Error"));
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+}
+
+#[test]
+fn editing_preserves_utf8_and_utf16_byte_order_marks() {
+    let scratch = Scratch::new("bom-edit");
+    for (name, bom, body, expected) in [
+        ("utf8.txt", vec![0xef, 0xbb, 0xbf], b"old".to_vec(), b"new".to_vec()),
+        ("utf16le.txt", vec![0xff, 0xfe], "old".encode_utf16().flat_map(u16::to_le_bytes).collect(), "new".encode_utf16().flat_map(u16::to_le_bytes).collect()),
+        ("utf16be.txt", vec![0xfe, 0xff], "old".encode_utf16().flat_map(u16::to_be_bytes).collect(), "new".encode_utf16().flat_map(u16::to_be_bytes).collect()),
+    ] {
+        let path = scratch.join(name);
+        std::fs::write(&path, [bom.as_slice(), body.as_slice()].concat()).unwrap();
+        let mut edit = params(FileSystemMode::Edit, &path);
+        edit.old_text = Some("old".into());
+        edit.new_text = Some("new".into());
+        assert_ok(&file_system(edit), "BOM edit");
+        assert_eq!(std::fs::read(path).unwrap(), [bom.as_slice(), expected.as_slice()].concat());
+    }
+}
+
+#[test]
+fn content_search_skips_sensitive_and_oversized_files() {
+    let scratch = Scratch::new("search-limits");
+    scratch.write("normal.txt", "public needle");
+    scratch.write(".env", "secret needle");
+    scratch.write("private.pem", "private needle");
+    std::fs::File::create(scratch.0.join("large.txt")).unwrap().set_len(10 * 1024 * 1024 + 1).unwrap();
+    let mut search = params(FileSystemMode::Search, &scratch.0.to_string_lossy());
+    search.pattern = Some("*".into());
+    search.content_pattern = Some("needle".into());
+    let response = file_system(search);
+    assert!(response.contains("public needle"), "{response}");
+    assert!(!response.contains("secret needle"), "{response}");
+    assert!(!response.contains("private needle"), "{response}");
+    assert!(response.contains("Skipped 3"), "{response}");
+}
+
+#[test]
+fn recursive_list_does_not_expose_dot_directory_contents() {
+    let scratch = Scratch::new("hidden-directory");
+    std::fs::create_dir(scratch.0.join(".hidden")).unwrap();
+    std::fs::write(scratch.0.join(".hidden/inside.txt"), "private").unwrap();
+    scratch.write("visible.txt", "visible");
+    let mut list = params(FileSystemMode::List, &scratch.0.to_string_lossy());
+    list.recursive = Some(BoolOrString::Bool(true));
+    let response = file_system(list);
+    assert!(response.contains("visible.txt"));
+    assert!(!response.contains("inside.txt"), "{response}");
+}
+
+#[test]
+fn sensitive_symlink_targets_are_rejected_when_links_are_available() {
+    let scratch = Scratch::new("sensitive-link");
+    let target = scratch.write(".env", "secret");
+    let alias = scratch.join("alias.txt");
+    if let Err(error) = std::os::windows::fs::symlink_file(&target, &alias) {
+        eprintln!("symlink test unavailable: {error}");
+        return;
+    }
+    let response = file_system(params(FileSystemMode::Read, &alias));
+    assert!(response.contains("sensitive file denied"), "{response}");
 }

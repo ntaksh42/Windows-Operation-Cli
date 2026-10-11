@@ -5,6 +5,13 @@ use std::io::Write;
 use std::sync::{Mutex, OnceLock};
 
 static AUDIT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static INPUT_LOCK: Mutex<()> = Mutex::new(());
+
+/// Serialize complete MCP input operations, without locking their nested helpers.
+pub fn with_input_lock<T>(operation: impl FnOnce() -> T) -> T {
+    let _guard = INPUT_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    operation()
+}
 
 #[derive(Debug)]
 pub struct ToolCall {
@@ -69,6 +76,21 @@ fn write_audit(tool: &str, ok: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn input_operations_do_not_overlap() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let active = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| with_input_lock(|| {
+                    assert_eq!(active.fetch_add(1, Ordering::SeqCst), 0);
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    assert_eq!(active.fetch_sub(1, Ordering::SeqCst), 1);
+                }));
+            }
+        });
+    }
 
     #[test]
     fn disabled_names_are_case_insensitive_and_trimmed() {

@@ -42,9 +42,9 @@ EnumDisplayMonitors + GetMonitorInfoExW + GetDpiForMonitor(Shcore)。index は A
 | param | type | default |
 |---|---|---|
 | command | string | 必須 |
-| timeout | int 秒 | 30 |
+| timeout | int 秒 | 30（0〜3600 にクランプ） |
 
-応答は常に `"Response: {output}\nStatus Code: {code}"`。
+応答は常に `"Response: {output}\nStatus Code: {code}"`。各出力ストリームは最大 1 MiB を保持し、超過を表示する。終了コードが非 0 の場合は stdout と stderr の両方を含める。
 
 実装要点:
 - pwsh 優先、なければ powershell 5.1。
@@ -96,9 +96,9 @@ Rust 版では windows crate の Registry API 直呼びでも可（応答文字�
 
 UIA 走査は既定でフォアグラウンドアプリのみ（同一PIDのポップアップを含む）。`scope` は
 `foreground`（既定）/`all`、`window` は単一アプリの代表ウィンドウのタイトル曖昧検索。
-`window` と `scope=all` は併用不可。`timeout_ms` は UIA 走査全体の期限で、
+`window` と `scope=all` は併用不可。`timeout_ms` は UIA 走査全体のソフトな期限で、
 既定 2000、範囲 100..=30000。期限切れ時は取得済み要素を返し、UI Tree に
-truncated 表示を含める。
+truncated 表示を含める。遅い provider の呼び出しは期限を超過し得る（応答に表示）。IA2 フォールバックも同じ期限と、訪問 5000 件・深さ 128 の上限を使う。
 
 | param | type | default |
 |---|---|---|
@@ -178,7 +178,7 @@ Rust では SendInput（MOUSEEVENTF_ABSOLUTE は仮想スクリーン基準に�
 | press_enter | bool | false |
 
 応答 `"Typed {text} at ({x},{y})."`
-手順: クリックでフォーカス → caret → clear → 入力。**20 文字以上かつ制御文字なし（\n \t { } を含まない）ならクリップボード経由ペースト**（元内容を保存→復元）。それ以外は 1 文字ずつ送信 (interval 0.04s)。\n→Enter、\t→Tab。press_enter で最後に Enter。
+手順: クリックでフォーカス → caret → clear → 入力。UTF-8 で 20 バイト以上かつ改行・タブ・復帰なしなら、テキスト形式のみのクリップボードでペースト（元内容を保存→復元）。部分入力はエラー、確認不能は警告を返し、二重送信を避ける。それ以外は 1 文字ずつ送信 (interval 0.005s)。\n→Enter、\t→Tab。press_enter で最後に Enter。
 
 ## 10. Scroll
 
@@ -321,3 +321,14 @@ Rust では windows crate の WinRT (Windows.UI.Notifications) 直呼びで可�
 - 走査対象ウィンドウは最大 8 スレッドで並列に走査する（各スレッドが自前の MTA と UIA オブジェクトを持つ）。結果は走査対象の順に後処理する。
 - CacheRequest は `AutomationElementMode_None`（読むのはキャッシュ値のみ）。Value もキャッシュし、200 文字に切り詰めて保持する。ClickablePoint もキャッシュから読み、要素ごとの `GetClickablePoint` 往復はしない。
 - リトライ: COM 一時失敗に指数バックオフ（Python 版 THREAD_MAX_RETRIES=3）。
+
+
+## Rust 版の保全・検証契約
+
+- MCP からの入力操作は操作全体を直列化する。バッチのラベル対象は実行直前にも再検証し、失敗時は完了件数を返す。
+- Snapshot/Screenshot の構造的な引数エラーは isError。ファイル未存在などの業務エラーの文字列応答は維持する。同期のシステム操作は blocking pool で実行する。
+- FileSystem copy/move は同一実体・親子パスを拒否する。上書き copy は兄弟領域で完成してから置換し、directory move は置換失敗時に元のコピー先を復元する。
+- write/edit は表現不能文字を拒否する。edit は不正バイトを拒否し、元の BOM と BOM が指定するエンコーディングを保持する。
+- list/search は走査 100000 件を上限とし、配下の読取失敗・走査打切りを表示する。再帰 list の show_hidden=false は dot directory 配下へ降りない。content search は sensitive 名・解決先、10 MiB 超、読取不能のファイルをスキップして件数を表示し、マッチ行は 1000 文字まで返す。
+- 長文ペーストはテキスト形式だけのクリップボードで使う。外部で変更されたクリップボードは復元で上書きしない。部分到達は再送せずエラー、確認不能は警告付き応答とする。
+- Scrape の HTTP 本文は最大 5 MiB。DOM 応答は前景ウィンドウ由来であり、要求 URL は未検証と表示する。

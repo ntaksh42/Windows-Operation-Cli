@@ -229,6 +229,15 @@ fn switch(name: Option<&str>) -> Outcome {
 
     let was_minimized = window::is_minimized(target.handle);
     window::switch_to(target.handle);
+    let deadline = std::time::Instant::now() + Duration::from_millis(300);
+    while window::foreground_window().is_none_or(|window| {
+        crate::window::root_window(window.handle) != crate::window::root_window(target.handle)
+    }) {
+        if std::time::Instant::now() >= deadline {
+            return (format!("Could not bring {} to the foreground.", target.title), None);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
     let message = if was_minimized {
         format!(
             "Restored {} from minimized and switched to it.",

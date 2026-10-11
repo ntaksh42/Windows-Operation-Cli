@@ -237,6 +237,20 @@ pub(crate) fn display_list_text(displays: &[display::Display]) -> String {
 /// failure) is returned as `Err` with a caller-facing message; the caller is
 /// expected to wrap it as `"Error capturing screenshot: {e}. Please try
 /// again."` per the tool's error contract.
+pub fn validate_params(params: &ScreenshotParams) -> Result<(), String> {
+    if params.window.is_some() && params.display.is_some() {
+        return Err("window cannot be combined with display".to_string());
+    }
+    crate::params::opt_bool(&params.use_annotation, false)?;
+    if let Some(indices) = &params.display {
+        let indices = indices.clone().into_list()?;
+        if let Some(index) = indices.iter().find(|&&index| index < 0) {
+            return Err(format!("Invalid display index {index}"));
+        }
+    }
+    Ok(())
+}
+
 pub fn screenshot(params: &ScreenshotParams) -> Result<ScreenshotOutput, String> {
     if let Some(query) = &params.window {
         if params.display.is_some() {

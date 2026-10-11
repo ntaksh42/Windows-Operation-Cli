@@ -22,11 +22,7 @@ pub fn shortcut(params: ShortcutParams) -> Result<String, String> {
     // `split('+')` always yields at least one token, and an empty one is
     // rejected by `resolve_key`, so an empty shortcut fails here rather than
     // reaching an emptiness check of its own.
-    let vks: Vec<u16> = params
-        .shortcut
-        .split('+')
-        .map(keys::resolve_key)
-        .collect::<Result<_, _>>()?;
+    let vks = keys::resolve_chord(&params.shortcut)?;
 
     input_sim::chord(&vks, input_sim::input_settle_delay())?;
     Ok(format!("Pressed {}.", params.shortcut))

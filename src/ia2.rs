@@ -1,6 +1,7 @@
 //! Firefox DOM fallback through Microsoft Active Accessibility/IAccessible.
 
 use std::mem::ManuallyDrop;
+use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::System::Com::IDispatch;
@@ -21,6 +22,25 @@ const STATE_SYSTEM_INVISIBLE: u32 = 0x8000;
 const STATE_SYSTEM_OFFSCREEN: u32 = 0x10000;
 const STATE_SYSTEM_FOCUSABLE: u32 = 0x100000;
 const MAX_NODES: usize = 5_000;
+const MAX_DEPTH: usize = 128;
+
+struct WalkBudget {
+    visited: usize,
+    deadline: Instant,
+    truncated: bool,
+}
+
+impl WalkBudget {
+    fn visit(&mut self, depth: usize) -> bool {
+        if self.visited >= MAX_NODES || depth >= MAX_DEPTH || Instant::now() >= self.deadline {
+            self.truncated = true;
+            false
+        } else {
+            self.visited += 1;
+            true
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Ia2Element {
@@ -37,6 +57,7 @@ pub struct Ia2Element {
 pub struct Ia2Result {
     pub dom_bounds: Option<RECT>,
     pub elements: Vec<Ia2Element>,
+    pub truncated: bool,
 }
 
 fn variant_i4(value: i32) -> VARIANT {
@@ -146,8 +167,10 @@ unsafe fn walk(
     child: &VARIANT,
     in_document: bool,
     result: &mut Ia2Result,
+    budget: &mut WalkBudget,
+    depth: usize,
 ) {
-    if result.elements.len() >= MAX_NODES {
+    if !budget.visit(depth) {
         return;
     }
     let Some((element, role)) = (unsafe { read_element(accessible, child) }) else {
@@ -168,7 +191,9 @@ unsafe fn walk(
     if count == 0 {
         return;
     }
-    let mut children = vec![VARIANT::default(); count.min(MAX_NODES - result.elements.len())];
+    let limit = count.min(MAX_NODES.saturating_sub(budget.visited));
+    result.truncated |= limit < count;
+    let mut children = vec![VARIANT::default(); limit];
     let mut obtained = 0;
     if unsafe { AccessibleChildren(accessible, 0, &mut children, &mut obtained) }.is_err() {
         return;
@@ -176,18 +201,25 @@ unsafe fn walk(
     for child_variant in children.iter().take(obtained.max(0) as usize) {
         if let Some(dispatch) = dispatch_from_variant(child_variant) {
             if let Ok(child_accessible) = dispatch.cast::<IAccessible>() {
-                unsafe { walk(&child_accessible, &variant_i4(0), in_document, result) };
+                unsafe { walk(&child_accessible, &variant_i4(0), in_document, result, budget, depth + 1) };
             }
         } else if variant_type(child_variant) == VT_I4 {
-            unsafe { walk(accessible, child_variant, in_document, result) };
+            unsafe { walk(accessible, child_variant, in_document, result, budget, depth + 1) };
         }
-        if result.elements.len() >= MAX_NODES {
+        if budget.truncated {
             break;
         }
     }
 }
 
 pub fn walk_firefox(hwnd: HWND) -> Result<Ia2Result, String> {
+    walk_firefox_with_deadline(hwnd, Instant::now() + Duration::from_secs(2))
+}
+
+pub(crate) fn walk_firefox_with_deadline(hwnd: HWND, deadline: Instant) -> Result<Ia2Result, String> {
+    if Instant::now() >= deadline {
+        return Ok(Ia2Result { truncated: true, ..Default::default() });
+    }
     unsafe {
         let mut raw = std::ptr::null_mut();
         AccessibleObjectFromWindow(hwnd, OBJID_CLIENT.0 as u32, &IAccessible::IID, &mut raw)
@@ -197,7 +229,25 @@ pub fn walk_firefox(hwnd: HWND) -> Result<Ia2Result, String> {
         }
         let accessible = IAccessible::from_raw(raw);
         let mut result = Ia2Result::default();
-        walk(&accessible, &variant_i4(0), false, &mut result);
+        let mut budget = WalkBudget { visited: 0, deadline, truncated: false };
+        walk(&accessible, &variant_i4(0), false, &mut result, &mut budget, 0);
+        result.truncated |= budget.truncated;
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unnamed_nodes_depth_and_deadline_are_bounded() {
+        let mut budget = WalkBudget { visited: 0, deadline: Instant::now() + Duration::from_secs(1), truncated: false };
+        for _ in 0..MAX_NODES { assert!(budget.visit(0)); }
+        assert!(!budget.visit(0));
+        budget.visited = 0;
+        assert!(!budget.visit(MAX_DEPTH));
+        budget.deadline = Instant::now();
+        assert!(!budget.visit(0));
     }
 }

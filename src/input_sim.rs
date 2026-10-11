@@ -12,7 +12,8 @@ use std::time::Duration;
 
 use windows::Win32::Foundation::{GlobalFree, POINT};
 use windows::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
+    CloseClipboard, CountClipboardFormats, EmptyClipboard, EnumClipboardFormats, GetClipboardData,
+    GetClipboardSequenceNumber, OpenClipboard, SetClipboardData,
 };
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -594,61 +595,114 @@ unsafe fn open_clipboard_with_retry() -> bool {
     false
 }
 
+unsafe fn read_open_clipboard_text() -> Option<String> {
+    unsafe {
+        let handle = GetClipboardData(13).ok()?;
+        let memory = windows::Win32::Foundation::HGLOBAL(handle.0 as *mut _);
+        let ptr = GlobalLock(memory);
+        if ptr.is_null() { return None; }
+        let wide = std::slice::from_raw_parts(ptr as *const u16, wcslen(ptr as *const u16));
+        let text = String::from_utf16_lossy(wide);
+        let _ = GlobalUnlock(memory);
+        Some(text)
+    }
+}
+
+unsafe fn write_open_clipboard_text(text: &str) -> bool {
+    unsafe {
+        let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+        let Ok(memory) = GlobalAlloc(GMEM_MOVEABLE, wide.len() * 2) else { return false; };
+        let ptr = GlobalLock(memory);
+        if ptr.is_null() { let _ = GlobalFree(Some(memory)); return false; }
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr as *mut u16, wide.len());
+        let _ = GlobalUnlock(memory);
+        if EmptyClipboard().is_err() || SetClipboardData(13, Some(windows::Win32::Foundation::HANDLE(memory.0))).is_err() {
+            let _ = GlobalFree(Some(memory));
+            return false;
+        }
+        true
+    }
+}
+
 /// Reads CF_UNICODETEXT from the clipboard, if present.
 pub fn get_clipboard_text() -> Option<String> {
     unsafe {
-        if !open_clipboard_with_retry() {
-            return None;
-        }
-        let result = (|| {
-            let handle = GetClipboardData(13 /* CF_UNICODETEXT */).ok()?;
-            let ptr = GlobalLock(windows::Win32::Foundation::HGLOBAL(handle.0 as *mut _));
-            if ptr.is_null() {
-                return None;
-            }
-            let wide = std::slice::from_raw_parts(ptr as *const u16, wcslen(ptr as *const u16));
-            let text = String::from_utf16_lossy(wide);
-            let _ = GlobalUnlock(windows::Win32::Foundation::HGLOBAL(handle.0 as *mut _));
-            Some(text)
-        })();
+        if !open_clipboard_with_retry() { return None; }
+        let result = read_open_clipboard_text();
         let _ = CloseClipboard();
         result
     }
 }
 
-/// Writes `text` to the clipboard as CF_UNICODETEXT. Returns `true` on
-/// success.
 pub fn set_clipboard_text(text: &str) -> bool {
     unsafe {
-        if !open_clipboard_with_retry() {
-            return false;
-        }
-        let ok = (|| {
-            let _ = EmptyClipboard();
-            let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
-            let byte_len = wide.len() * std::mem::size_of::<u16>();
-            let hmem = GlobalAlloc(GMEM_MOVEABLE, byte_len).ok()?;
-            let ptr = GlobalLock(hmem);
-            if ptr.is_null() {
-                let _ = GlobalFree(Some(hmem));
-                return None;
-            }
-            std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr as *mut u16, wide.len());
-            let _ = GlobalUnlock(hmem);
-            if SetClipboardData(
-                13, /* CF_UNICODETEXT */
-                Some(windows::Win32::Foundation::HANDLE(hmem.0)),
-            )
-            .is_err()
-            {
-                let _ = GlobalFree(Some(hmem));
-                return None;
-            }
-            Some(())
-        })()
-        .is_some();
+        if !open_clipboard_with_retry() { return false; }
+        let result = write_open_clipboard_text(text);
         let _ = CloseClipboard();
-        ok
+        result
+    }
+}
+
+fn text_only_formats(formats: &[u32]) -> bool {
+    formats.iter().all(|format| matches!(format, 1 | 7 | 13 | 16))
+}
+
+/// Temporarily replace only a text clipboard; never discard other formats.
+pub(crate) struct PasteClipboard {
+    prior: Option<String>,
+    sequence: u32,
+    active: bool,
+}
+
+impl PasteClipboard {
+    pub(crate) fn prepare(text: &str) -> Result<Option<Self>, String> {
+        unsafe {
+            if !open_clipboard_with_retry() { return Ok(None); }
+            let result = (|| {
+                let mut formats = Vec::new();
+                let mut format = EnumClipboardFormats(0);
+                while format != 0 {
+                    formats.push(format);
+                    format = EnumClipboardFormats(format);
+                }
+                if CountClipboardFormats().max(0) as usize != formats.len() || !text_only_formats(&formats) { return Ok(None); }
+                let prior = read_open_clipboard_text();
+                if !formats.is_empty() && prior.is_none() { return Ok(None); }
+                if !write_open_clipboard_text(text) {
+                    let restored = match &prior { Some(value) => write_open_clipboard_text(value), None => EmptyClipboard().is_ok() };
+                    return if restored { Ok(None) } else { Err("Clipboard setup and restoration failed; no text was pasted.".to_string()) };
+                }
+                Ok(Some(Self { prior, sequence: GetClipboardSequenceNumber(), active: true }))
+            })();
+            let _ = CloseClipboard();
+            result
+        }
+    }
+
+    fn restore(&self) -> Result<(), String> {
+        unsafe {
+            if !open_clipboard_with_retry() { return Err("Could not restore clipboard after input; text may already have arrived.".to_string()); }
+            // Check while holding the clipboard so an external update cannot race restoration.
+            let ok = if GetClipboardSequenceNumber() != self.sequence {
+                true
+            } else {
+                match &self.prior { Some(text) => write_open_clipboard_text(text), None => EmptyClipboard().is_ok() }
+            };
+            let _ = CloseClipboard();
+            if ok { Ok(()) } else { Err("Could not restore clipboard after input; text may already have arrived.".to_string()) }
+        }
+    }
+
+    pub(crate) fn finish(mut self) -> Result<(), String> {
+        let result = self.restore();
+        self.active = false;
+        result
+    }
+}
+
+impl Drop for PasteClipboard {
+    fn drop(&mut self) {
+        if self.active { let _ = self.restore(); }
     }
 }
 
@@ -680,6 +734,15 @@ mod tests {
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn paste_does_not_discard_non_text_clipboard_formats() {
+        assert!(text_only_formats(&[]));
+        assert!(text_only_formats(&[1, 7, 13, 16]));
+        assert!(!text_only_formats(&[13, 2])); // bitmap
+        assert!(!text_only_formats(&[13, 15])); // file list
+        assert!(!text_only_formats(&[13, 0xc001])); // registered HTML format
+    }
 
     #[test]
     fn input_settle_delay_defaults_to_twenty_milliseconds() {
