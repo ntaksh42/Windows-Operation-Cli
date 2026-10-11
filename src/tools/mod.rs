@@ -18,6 +18,7 @@ pub mod multi_edit;
 pub mod multi_select;
 pub mod notification;
 pub mod process;
+pub mod record;
 pub mod registry;
 pub mod scrape;
 pub mod screenshot;

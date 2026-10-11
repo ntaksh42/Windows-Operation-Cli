@@ -37,6 +37,7 @@ After acting, re-observe (`Screenshot` is usually enough) to verify the effect b
 |---|---|
 | See the screen quickly | `Screenshot` |
 | See one window that may be covered | `Screenshot` with `window` (bring it forward with `App` before clicking what you saw) |
+| Record what a sequence of actions does as a GIF | `Record` action=start, act, then `Record` action=stop |
 | Find and target controls | `Snapshot` (then `InvokeElement`) |
 | Launch / focus / resize an app | `App` |
 | Run a command, script, or anything non-UI | `PowerShell` |

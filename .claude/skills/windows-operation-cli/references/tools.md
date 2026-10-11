@@ -4,7 +4,7 @@ Distilled from `src/server.rs` and `docs/SPEC.md`. Parameters marked `?` are opt
 
 ## Contents
 
-- [Observation: Screenshot, Snapshot, DisplayInventory, CursorPosition, CaretInfo](#observation)
+- [Observation: Screenshot, Record, Snapshot, DisplayInventory, CursorPosition, CaretInfo](#observation)
 - [Element actions: InvokeElement, Click, Type, Scroll, Move, MultiSelect, MultiEdit](#element-actions)
 - [Keyboard: Shortcut](#keyboard)
 - [Synchronization: Wait, WaitFor](#synchronization)
@@ -45,6 +45,21 @@ Screen vs. window capture:
 With `window`, the output has `Screenshot Window: <title>` and `Screenshot Backend: printwindow`. If the window cannot render itself (some GPU-rendered apps), it falls back to the window's screen region and says so in the backend line; windows in front of it then appear in the image. A coordinate taken from a window capture is only clickable if nothing covers that point — bring the window forward (`App`) before clicking.
 
 A `Screenshot Warning:` line means the image came back almost entirely black: Windows gave no desktop content (locked workstation, secure desktop, minimized or disconnected RDP, or a server outside the interactive session). Do not read or click from that image; run `Doctor`.
+
+### Record
+
+Records the screen, displays, or one window to an animated GIF. Two calls: `start` returns at once and records in the background, so act with other tools, then `stop`.
+
+| param | type | default | notes |
+|---|---|---|---|
+| action | "start" \| "stop" | required | |
+| fps | int | 5 | 1-10; start only |
+| max_duration | int | 30 | 1-60 seconds; the recording ends by itself here; start only |
+| display | [int]? | null | same as Screenshot; start only |
+| window | string? | null | same as Screenshot, even when covered; incompatible with `display`; start only |
+| path | string? | `%TEMP%\windows-operation-cli\record-<timestamp>.gif` | absolute; an existing file is refused; start only |
+
+`stop` returns the saved path, GIF size, frame count, duration and file size. The GIF is downscaled to fit 1280x720, has no mouse cursor, and merges unchanged frames, so an idle stretch costs no space. One recording at a time. A `Recording Warning:` line means every frame was black — see the `Screenshot Warning` note above.
 
 ### Snapshot
 

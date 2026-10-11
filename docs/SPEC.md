@@ -280,6 +280,26 @@ title, message, app_id（全部必須）。WinRT ToastNotificationManager（Toas
 応答 `'Notification sent: "{title}" - {message}'`。失敗しても文字列で返す。
 Rust では windows crate の WinRT (Windows.UI.Notifications) 直呼びで可。
 
+## 21. Record
+
+画面・ディスプレイ・1 ウィンドウを GIF に録画する（本リポジトリ独自。元の Python 版にはない）。
+ツール呼び出しは同期なので、録画中に他のツールを動かせるよう start / stop の 2 アクションにする。
+
+| param | type | default |
+|---|---|---|
+| action | "start" \| "stop" | 必須 |
+| fps | int | 5（1–10。start のみ） |
+| max_duration | int | 30（1–60 秒。到達で自動停止。start のみ） |
+| display | [int]? | null（Screenshot と同じ。start のみ） |
+| window | string? | null（Screenshot と同じ。display と排他。start のみ） |
+| path | string? | `%TEMP%\windows-operation-cli\record-YYYYMMDD-HHMMSS.gif`（絶対パス・既存ファイルは拒否。start のみ） |
+
+- start: 最初のフレームを呼び出し側で撮って検証し、以降は背景スレッドで撮りながら 1 フレームずつ GIF に書く（メモリは録画時間に比例しない）。同時に走る録画は 1 つ。
+- 出力は 1280x720 に収まるよう縮小（`WINDOWS_MCP_SCREENSHOT_SCALE` も効く）。マウスカーソルは映らない。
+- 画面が変わらない間は直前フレームの表示時間を延ばす（同一フレームを保存し直さない）。
+- 取得に失敗したフレームは飛ばし、連続 5 回失敗で録画を終える（それまでの内容は保存される）。
+- stop: 保存先・GIF サイズ・フレーム数・秒数・ファイルサイズを返す。全フレームが黒なら `Recording Warning:` を付ける。
+
 ---
 
 ## 環境変数（Rust 版でも維持）

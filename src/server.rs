@@ -25,6 +25,7 @@ use crate::tools::multi_edit::{self, MultiEditParams};
 use crate::tools::multi_select::{self, MultiSelectParams};
 use crate::tools::notification::{self, NotificationParams};
 use crate::tools::process::{self, ProcessParams};
+use crate::tools::record::{self, RecordParams};
 use crate::tools::registry::{self, RegistryParams};
 use crate::tools::scrape::{self, ScrapeParams};
 use crate::tools::screenshot::{self, ScreenshotParams};
@@ -313,6 +314,22 @@ impl WindowsOperationCliServer {
                 "Error capturing screenshot: {e}. Please try again."
             ))])),
         }
+    }
+
+    #[tool(
+        name = "Record",
+        description = "Records the screen, some displays (display), or one window (window, even while covered) to an animated GIF file. action=\"start\" begins recording in the background and returns at once, so run other tools (Click, Type, ...) and then call action=\"stop\" to finish and get the file path. The recording also ends by itself after max_duration seconds (default 30, max 60). fps is 1-10 (default 5). The GIF is downscaled to fit 1280x720 and does not include the mouse cursor. Only one recording runs at a time.",
+        annotations(destructive_hint = false)
+    )]
+    async fn record(
+        &self,
+        Parameters(params): Parameters<RecordParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let audit = begin_tool!("Record");
+        let result = tokio::task::spawn_blocking(move || record::record(params))
+            .await
+            .unwrap_or_else(|e| Err(format!("Record tool panicked: {e}")));
+        as_call_result(result, audit)
     }
 
     #[tool(
