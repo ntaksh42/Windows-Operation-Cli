@@ -169,7 +169,10 @@ fn assert_capture_is_usable(app: &App, label: &str, result: &SnapshotResult) {
         "{label}: no interactive elements found in the window"
     );
 
-    let named = owned.iter().filter(|node| !node.name.trim().is_empty()).count();
+    let named = owned
+        .iter()
+        .filter(|node| !node.name.trim().is_empty())
+        .count();
     assert!(
         named * 2 >= owned.len(),
         "{label}: only {named} of {} controls have a name; the capture is not addressable",

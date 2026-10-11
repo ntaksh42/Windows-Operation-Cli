@@ -87,10 +87,8 @@ impl Browser {
         // browser may not have finished exiting.
         static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let unique = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let profile = std::env::temp_dir().join(format!(
-            "wocli-dom-probe-{}-{unique}",
-            std::process::id()
-        ));
+        let profile =
+            std::env::temp_dir().join(format!("wocli-dom-probe-{}-{unique}", std::process::id()));
         let child = Command::new(executable)
             .args([
                 "--new-window",
@@ -116,9 +114,11 @@ impl Browser {
                 let deadline = Instant::now() + Duration::from_secs(20);
                 while Instant::now() < deadline {
                     std::thread::sleep(Duration::from_millis(400));
-                    if capture_dom().informative_nodes.iter().any(|node| {
-                        node.name.contains(HEADING) || node.name.contains(PARAGRAPH)
-                    }) {
+                    if capture_dom()
+                        .informative_nodes
+                        .iter()
+                        .any(|node| node.name.contains(HEADING) || node.name.contains(PARAGRAPH))
+                    {
                         break;
                     }
                 }

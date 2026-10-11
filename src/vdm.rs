@@ -144,8 +144,7 @@ pub fn is_window_on_current_desktop(handle: isize) -> bool {
 
 pub fn api_available() -> Result<(), String> {
     crate::uia::ensure_com_initialized()?;
-    with_desktop_manager(|_| ())
-        .ok_or_else(|| "VirtualDesktopManager is unavailable".to_string())
+    with_desktop_manager(|_| ()).ok_or_else(|| "VirtualDesktopManager is unavailable".to_string())
 }
 
 #[cfg(test)]

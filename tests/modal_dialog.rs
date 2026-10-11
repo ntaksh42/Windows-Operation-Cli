@@ -128,7 +128,9 @@ fn the_blocked_owners_text_is_still_readable() {
         .map(|node| node.name.as_str())
         .collect();
     assert!(
-        readable.iter().any(|name| name.contains(harness::STATUS_TEXT)),
+        readable
+            .iter()
+            .any(|name| name.contains(harness::STATUS_TEXT)),
         "the blocked window's label should still be readable; found {readable:?}"
     );
 }

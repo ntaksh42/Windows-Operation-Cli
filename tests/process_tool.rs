@@ -20,7 +20,12 @@ impl Victim {
         // nothing is left behind. `timeout.exe` is not usable here — it exits
         // immediately when its stdin is not a console.
         Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 120"])
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Seconds 120",
+            ])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -103,7 +108,10 @@ fn kill_by_pid_ends_that_process() {
         return;
     };
     std::thread::sleep(Duration::from_millis(500));
-    assert!(victim.is_running(), "the victim exited before it was killed");
+    assert!(
+        victim.is_running(),
+        "the victim exited before it was killed"
+    );
 
     let response = process(ProcessParams {
         mode: ProcessMode::Kill,
@@ -123,7 +131,10 @@ fn kill_by_pid_ends_that_process() {
     while victim.is_running() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(100));
     }
-    assert!(!victim.is_running(), "the process was still running after kill");
+    assert!(
+        !victim.is_running(),
+        "the process was still running after kill"
+    );
 }
 
 /// A PID that does not exist must be reported, not silently accepted.

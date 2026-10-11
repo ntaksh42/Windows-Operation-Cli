@@ -33,11 +33,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, GetMessageW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
     GetWindowThreadProcessId, HMENU, HWND_TOP, LB_ADDSTRING, LB_GETCURSEL, MSG, MoveWindow,
     PostMessageW, PostQuitMessage, RegisterClassW, SW_MINIMIZE, SW_SHOW, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_SHOWWINDOW,
-    SendMessageW, SetForegroundWindow, SetWindowPos, ShowWindow, TranslateMessage, WINDOW_EX_STYLE,
-    WM_COMMAND, WM_DESTROY, WM_LBUTTONDOWN, WM_RBUTTONDOWN, WM_USER, WNDCLASSW,
-    WS_BORDER, WS_CAPTION, WS_EX_DLGMODALFRAME, WS_POPUP, WS_SYSMENU, WS_CHILD, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
-    WindowFromPoint,
+    SWP_SHOWWINDOW, SendMessageW, SetForegroundWindow, SetWindowPos, ShowWindow, TranslateMessage,
+    WINDOW_EX_STYLE, WM_COMMAND, WM_DESTROY, WM_LBUTTONDOWN, WM_RBUTTONDOWN, WM_USER, WNDCLASSW,
+    WS_BORDER, WS_CAPTION, WS_CHILD, WS_EX_DLGMODALFRAME, WS_OVERLAPPEDWINDOW, WS_POPUP,
+    WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WindowFromPoint,
 };
 use windows::core::{PCWSTR, w};
 
@@ -141,8 +140,8 @@ unsafe extern "system" fn window_proc(
                 match control_id {
                     ID_BUTTON => emit(Event::ButtonClicked),
                     ID_CHECKBOX => {
-                        let checked =
-                            SendMessageW(control, BM_GETCHECK, None, None).0 == BST_CHECKED.0 as isize;
+                        let checked = SendMessageW(control, BM_GETCHECK, None, None).0
+                            == BST_CHECKED.0 as isize;
                         emit(Event::CheckboxToggled(checked));
                     }
                     ID_LISTBOX => {
@@ -418,7 +417,10 @@ impl TestApp {
                 CHECKBOX_TEXT,
                 // BS_AUTOCHECKBOX (0x03) keeps the checked state without the
                 // window proc having to maintain it.
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE(0x0000_0003),
+                WS_CHILD
+                    | WS_VISIBLE
+                    | WS_TABSTOP
+                    | windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE(0x0000_0003),
                 layout::CHECKBOX,
                 ID_CHECKBOX,
             );
@@ -440,7 +442,10 @@ impl TestApp {
                 "",
                 // LBS_NOTIFY (0x0001) makes the listbox report selection
                 // changes through WM_COMMAND.
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER
+                WS_CHILD
+                    | WS_VISIBLE
+                    | WS_TABSTOP
+                    | WS_BORDER
                     | windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE(0x0000_0001),
                 layout::LISTBOX,
                 ID_LISTBOX,
@@ -660,7 +665,11 @@ impl TestApp {
     }
 
     pub fn set_checked(&self, checked: bool) {
-        let state = if checked { BST_CHECKED.0 } else { BST_UNCHECKED.0 };
+        let state = if checked {
+            BST_CHECKED.0
+        } else {
+            BST_UNCHECKED.0
+        };
         unsafe {
             SendMessageW(
                 HWND(self.checkbox as *mut _),

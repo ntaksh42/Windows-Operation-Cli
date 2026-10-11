@@ -332,7 +332,8 @@ fn edit_file(
             with_commas(bytes.len() as u64)
         );
     }
-    let (actual_encoding, bom_len) = encoding_rs::Encoding::for_bom(&bytes).unwrap_or((encoding, 0));
+    let (actual_encoding, bom_len) =
+        encoding_rs::Encoding::for_bom(&bytes).unwrap_or((encoding, 0));
     let text = match decode_text_checked(&bytes[bom_len..], actual_encoding) {
         Ok(text) => text,
         Err(error) => return format!("Error: {error}; file was not edited."),
@@ -458,32 +459,54 @@ fn decode_text(bytes: &[u8], encoding: &'static encoding_rs::Encoding) -> String
     }
 }
 
-fn decode_text_checked(bytes: &[u8], encoding: &'static encoding_rs::Encoding) -> Result<String, String> {
+fn decode_text_checked(
+    bytes: &[u8],
+    encoding: &'static encoding_rs::Encoding,
+) -> Result<String, String> {
     if encoding == encoding_rs::UTF_16LE || encoding == encoding_rs::UTF_16BE {
         if !bytes.len().is_multiple_of(2) {
             return Err("Invalid UTF-16 byte length".to_string());
         }
-        let units: Vec<u16> = bytes.chunks_exact(2).map(|pair| {
-            if encoding == encoding_rs::UTF_16LE { u16::from_le_bytes([pair[0], pair[1]]) }
-            else { u16::from_be_bytes([pair[0], pair[1]]) }
-        }).collect();
+        let units: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|pair| {
+                if encoding == encoding_rs::UTF_16LE {
+                    u16::from_le_bytes([pair[0], pair[1]])
+                } else {
+                    u16::from_be_bytes([pair[0], pair[1]])
+                }
+            })
+            .collect();
         String::from_utf16(&units).map_err(|error| format!("Invalid UTF-16: {error}"))
     } else {
         let (text, errors) = encoding.decode_without_bom_handling(bytes);
-        if errors { Err(format!("Invalid bytes for {}", encoding.name())) }
-        else { Ok(text.into_owned()) }
+        if errors {
+            Err(format!("Invalid bytes for {}", encoding.name()))
+        } else {
+            Ok(text.into_owned())
+        }
     }
 }
 
-fn encode_text_checked<'a>(content: &'a str, encoding: &'static encoding_rs::Encoding) -> Result<std::borrow::Cow<'a, [u8]>, String> {
+fn encode_text_checked<'a>(
+    content: &'a str,
+    encoding: &'static encoding_rs::Encoding,
+) -> Result<std::borrow::Cow<'a, [u8]>, String> {
     if encoding == encoding_rs::UTF_16LE {
-        Ok(std::borrow::Cow::Owned(content.encode_utf16().flat_map(u16::to_le_bytes).collect()))
+        Ok(std::borrow::Cow::Owned(
+            content.encode_utf16().flat_map(u16::to_le_bytes).collect(),
+        ))
     } else if encoding == encoding_rs::UTF_16BE {
-        Ok(std::borrow::Cow::Owned(content.encode_utf16().flat_map(u16::to_be_bytes).collect()))
+        Ok(std::borrow::Cow::Owned(
+            content.encode_utf16().flat_map(u16::to_be_bytes).collect(),
+        ))
     } else {
         let (bytes, _, errors) = encoding.encode(content);
-        if errors { Err(format!("Text cannot be represented in {}", encoding.name())) }
-        else { Ok(bytes) }
+        if errors {
+            Err(format!("Text cannot be represented in {}", encoding.name()))
+        } else {
+            Ok(bytes)
+        }
     }
 }
 
@@ -504,8 +527,17 @@ fn comparable_path(path: &Path) -> io::Result<PathBuf> {
     let mut ancestor = absolute.as_path();
     let mut suffix = Vec::new();
     while !ancestor.exists() {
-        suffix.push(ancestor.file_name().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Invalid destination path"))?.to_os_string());
-        ancestor = ancestor.parent().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "No existing path ancestor"))?;
+        suffix.push(
+            ancestor
+                .file_name()
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "Invalid destination path")
+                })?
+                .to_os_string(),
+        );
+        ancestor = ancestor.parent().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "No existing path ancestor")
+        })?;
     }
     let mut resolved = fs::canonicalize(ancestor)?;
     for component in suffix.into_iter().rev() {
@@ -522,7 +554,10 @@ fn validate_transfer(src: &Path, dst: &Path) -> io::Result<()> {
         || (src.is_dir() && destination.starts_with(&source))
         || (dst.exists() && same_file::is_same_file(src, dst)?)
     {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Source and destination must not be the same path or contain one another"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Source and destination must not be the same path or contain one another",
+        ));
     }
     Ok(())
 }
@@ -534,10 +569,16 @@ impl TransferStage {
     fn new(destination: &Path) -> io::Result<Self> {
         use std::sync::atomic::{AtomicU64, Ordering};
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let parent = destination.parent().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Destination has no parent"))?;
+        let parent = destination.parent().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "Destination has no parent")
+        })?;
         fs::create_dir_all(parent)?;
         loop {
-            let path = parent.join(format!(".woc-transfer-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+            let path = parent.join(format!(
+                ".woc-transfer-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
             match fs::create_dir(&path) {
                 Ok(()) => return Ok(Self(path)),
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -555,7 +596,10 @@ impl Drop for TransferStage {
 
 fn replace_destination(source: &Path, destination: &Path, overwrite: bool) -> io::Result<()> {
     if destination.exists() && !overwrite {
-        return Err(io::Error::new(io::ErrorKind::AlreadyExists, "Destination already exists; set overwrite=True to replace"));
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "Destination already exists; set overwrite=True to replace",
+        ));
     }
     if !destination.exists() || (source.is_file() && destination.is_file()) {
         return fs::rename(source, destination);
@@ -568,7 +612,9 @@ fn replace_destination(source: &Path, destination: &Path, overwrite: bool) -> io
             // Preserve the only remaining original if rollback itself fails.
             let location = saved.display().to_string();
             std::mem::forget(backup);
-            return Err(io::Error::other(format!("{error}; rollback failed: {restore}; original retained at {location}")));
+            return Err(io::Error::other(format!(
+                "{error}; rollback failed: {restore}; original retained at {location}"
+            )));
         }
         return Err(error);
     }
@@ -583,7 +629,10 @@ fn copy_path(src: &Path, dst: &Path, overwrite: bool) -> String {
         return copy_error(&error);
     }
     if dst.exists() && !overwrite {
-        return format!("Error: Destination already exists: {}. Set overwrite=True to replace.", dst.display());
+        return format!(
+            "Error: Destination already exists: {}. Set overwrite=True to replace.",
+            dst.display()
+        );
     }
     let result = (|| {
         let stage = TransferStage::new(dst)?;
@@ -593,12 +642,20 @@ fn copy_path(src: &Path, dst: &Path, overwrite: bool) -> String {
         } else if src.is_file() {
             copy_file(src, &staged)?;
         } else {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Unsupported file type"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Unsupported file type",
+            ));
         }
         replace_destination(&staged, dst, overwrite)
     })();
     match result {
-        Ok(()) => format!("Copied {}: {} -> {}", if src.is_dir() { "directory" } else { "file" }, src.display(), dst.display()),
+        Ok(()) => format!(
+            "Copied {}: {} -> {}",
+            if src.is_dir() { "directory" } else { "file" },
+            src.display(),
+            dst.display()
+        ),
         Err(error) => copy_error(&error),
     }
 }
@@ -652,10 +709,17 @@ fn move_path(src: &Path, dst: &Path, overwrite: bool) -> String {
             Err(error) if error.raw_os_error() == Some(17) => {
                 let stage = TransferStage::new(dst)?;
                 let staged = stage.0.join("new");
-                if src.is_dir() { copy_dir_recursive(src, &staged)?; }
-                else { copy_file(src, &staged)?; }
+                if src.is_dir() {
+                    copy_dir_recursive(src, &staged)?;
+                } else {
+                    copy_file(src, &staged)?;
+                }
                 replace_destination(&staged, dst, overwrite)?;
-                if src.is_dir() { fs::remove_dir_all(src) } else { fs::remove_file(src) }
+                if src.is_dir() {
+                    fs::remove_dir_all(src)
+                } else {
+                    fs::remove_file(src)
+                }
             }
             Err(error) => Err(error),
         }
@@ -936,15 +1000,25 @@ fn search_files(
                     total += 1;
                     if matches.len() < MAX_RESULTS {
                         let preview: String = line.chars().take(1000).collect();
-                        let suffix = if preview.len() < line.len() { " [line truncated]" } else { "" };
-                        matches.push(format!("{}:{}: {preview}{suffix}", entry_path.display(), index + 1));
+                        let suffix = if preview.len() < line.len() {
+                            " [line truncated]"
+                        } else {
+                            ""
+                        };
+                        matches.push(format!(
+                            "{}:{}: {preview}{suffix}",
+                            entry_path.display(),
+                            index + 1
+                        ));
                     }
                 }
             }
         }
         let skipped_notice = if skipped > 0 {
             format!("\nSkipped {skipped} file(s): sensitive, too large, or unreadable.")
-        } else { String::new() };
+        } else {
+            String::new()
+        };
         if total == 0 {
             return format!(
                 "No content matches found for /{content_pattern}/ in files matching \"{pattern}\"{notice}{skipped_notice}"
@@ -957,7 +1031,10 @@ fn search_files(
     }
 
     if raw.is_empty() {
-        return format!("No matches found for \"{pattern}\" in {}{notice}", path.display());
+        return format!(
+            "No matches found for \"{pattern}\" in {}{notice}",
+            path.display()
+        );
     }
 
     let total = raw.len();
@@ -1017,29 +1094,61 @@ struct WalkResult {
 impl WalkResult {
     fn notice(&self) -> String {
         let mut notice = String::new();
-        if self.skipped > 0 { notice += &format!("\nSkipped {} unreadable entries or directories.", self.skipped); }
-        if self.truncated { notice += &format!("\nScan truncated at {MAX_SCAN_ENTRIES} entries."); }
+        if self.skipped > 0 {
+            notice += &format!(
+                "\nSkipped {} unreadable entries or directories.",
+                self.skipped
+            );
+        }
+        if self.truncated {
+            notice += &format!("\nScan truncated at {MAX_SCAN_ENTRIES} entries.");
+        }
         notice
     }
 }
 
 fn walk(dir: &Path, recursive: bool, skip_dot_dirs: bool) -> io::Result<WalkResult> {
-    let mut result = WalkResult { entries: Vec::new(), skipped: 0, truncated: false };
+    let mut result = WalkResult {
+        entries: Vec::new(),
+        skipped: 0,
+        truncated: false,
+    };
     let mut stack = vec![dir.to_path_buf()];
     'scan: while let Some(current) = stack.pop() {
         let entries = match fs::read_dir(&current) {
             Ok(entries) => entries,
             Err(error) if current == dir => return Err(error),
-            Err(_) => { result.skipped += 1; continue; }
+            Err(_) => {
+                result.skipped += 1;
+                continue;
+            }
         };
         for entry in entries {
-            if result.entries.len() >= MAX_SCAN_ENTRIES { result.truncated = true; break 'scan; }
-            let entry = match entry { Ok(entry) => entry, Err(_) => { result.skipped += 1; continue; } };
-            let file_type = match entry.file_type() { Ok(kind) => kind, Err(_) => { result.skipped += 1; continue; } };
+            if result.entries.len() >= MAX_SCAN_ENTRIES {
+                result.truncated = true;
+                break 'scan;
+            }
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => {
+                    result.skipped += 1;
+                    continue;
+                }
+            };
+            let file_type = match entry.file_type() {
+                Ok(kind) => kind,
+                Err(_) => {
+                    result.skipped += 1;
+                    continue;
+                }
+            };
             let is_dir = file_type.is_dir();
-            let hidden_dir = skip_dot_dirs && is_dir && entry.file_name().to_string_lossy().starts_with('.');
+            let hidden_dir =
+                skip_dot_dirs && is_dir && entry.file_name().to_string_lossy().starts_with('.');
             result.entries.push((entry.path(), is_dir));
-            if recursive && is_dir && !hidden_dir { stack.push(entry.path()); }
+            if recursive && is_dir && !hidden_dir {
+                stack.push(entry.path());
+            }
         }
     }
     Ok(result)
@@ -1051,7 +1160,10 @@ fn read_bounded_file(path: &Path) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     file.take(MAX_READ_SIZE + 1).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > MAX_READ_SIZE {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "File too large (maximum 10 MiB)"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "File too large (maximum 10 MiB)",
+        ));
     }
     Ok(bytes)
 }

@@ -72,7 +72,9 @@ fn snapshot_discovers_the_windows_controls_with_their_semantics() {
         .unwrap_or_else(|| panic!("the checkbox was not discovered; found: {nodes:#?}"));
     assert_eq!(checkbox.control_type, "checkbox");
     assert!(
-        checkbox.supported_actions.contains(&SupportedAction::Toggle),
+        checkbox
+            .supported_actions
+            .contains(&SupportedAction::Toggle),
         "a checkbox must expose TogglePattern, got {:?}",
         checkbox.supported_actions
     );
@@ -200,7 +202,10 @@ fn type_delivers_short_text_verbatim_character_by_character() {
     // Unicode values: 'd' (U+0064 = VK_NUMPAD4), 'o' (U+006F = VK_DIVIDE), and
     // an uppercase letter, which typed as lowercase before the fix.
     let text = "Dog/4a";
-    assert!(text.chars().count() < 20, "must take the per-character path");
+    assert!(
+        text.chars().count() < 20,
+        "must take the per-character path"
+    );
 
     let (x, y) = app.center_of(layout::EDIT);
     typing::type_text(TypeParams {

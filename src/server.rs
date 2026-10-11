@@ -81,9 +81,11 @@ impl WindowsOperationCliServer {
         Parameters(params): Parameters<InvokeElementParams>,
     ) -> Result<CallToolResult, McpError> {
         let audit = begin_tool!("InvokeElement");
-        let result = tokio::task::spawn_blocking(move || with_input_lock(|| invoke_element::invoke_element(params)))
-            .await
-            .unwrap_or_else(|e| Err(format!("InvokeElement tool panicked: {e}")));
+        let result = tokio::task::spawn_blocking(move || {
+            with_input_lock(|| invoke_element::invoke_element(params))
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("InvokeElement tool panicked: {e}")));
         as_call_result(result, audit)
     }
 
@@ -177,9 +179,10 @@ impl WindowsOperationCliServer {
         Parameters(params): Parameters<TypeParams>,
     ) -> Result<CallToolResult, McpError> {
         let audit = begin_tool!("Type");
-        let result = tokio::task::spawn_blocking(move || with_input_lock(|| typing::type_text(params)))
-            .await
-            .unwrap_or_else(|error| Err(format!("Type tool panicked: {error}")));
+        let result =
+            tokio::task::spawn_blocking(move || with_input_lock(|| typing::type_text(params)))
+                .await
+                .unwrap_or_else(|error| Err(format!("Type tool panicked: {error}")));
         as_call_result(result, audit)
     }
 
@@ -192,9 +195,10 @@ impl WindowsOperationCliServer {
         Parameters(params): Parameters<ScrollParams>,
     ) -> Result<CallToolResult, McpError> {
         let audit = begin_tool!("Scroll");
-        let result = tokio::task::spawn_blocking(move || with_input_lock(|| scroll::scroll(params)))
-            .await
-            .unwrap_or_else(|error| Err(format!("Scroll tool panicked: {error}")));
+        let result =
+            tokio::task::spawn_blocking(move || with_input_lock(|| scroll::scroll(params)))
+                .await
+                .unwrap_or_else(|error| Err(format!("Scroll tool panicked: {error}")));
         as_call_result(result, audit)
     }
 
@@ -207,9 +211,10 @@ impl WindowsOperationCliServer {
         Parameters(params): Parameters<MoveParams>,
     ) -> Result<CallToolResult, McpError> {
         let audit = begin_tool!("Move");
-        let result = tokio::task::spawn_blocking(move || with_input_lock(|| move_mouse::move_mouse(params)))
-            .await
-            .unwrap_or_else(|error| Err(format!("Move tool panicked: {error}")));
+        let result =
+            tokio::task::spawn_blocking(move || with_input_lock(|| move_mouse::move_mouse(params)))
+                .await
+                .unwrap_or_else(|error| Err(format!("Move tool panicked: {error}")));
         as_call_result(result, audit)
     }
 
@@ -222,9 +227,10 @@ impl WindowsOperationCliServer {
         Parameters(params): Parameters<ShortcutParams>,
     ) -> Result<CallToolResult, McpError> {
         let audit = begin_tool!("Shortcut");
-        let result = tokio::task::spawn_blocking(move || with_input_lock(|| shortcut::shortcut(params)))
-            .await
-            .unwrap_or_else(|error| Err(format!("Shortcut tool panicked: {error}")));
+        let result =
+            tokio::task::spawn_blocking(move || with_input_lock(|| shortcut::shortcut(params)))
+                .await
+                .unwrap_or_else(|error| Err(format!("Shortcut tool panicked: {error}")));
         as_call_result(result, audit)
     }
 
@@ -237,9 +243,11 @@ impl WindowsOperationCliServer {
         Parameters(params): Parameters<MultiSelectParams>,
     ) -> Result<CallToolResult, McpError> {
         let audit = begin_tool!("MultiSelect");
-        let result = tokio::task::spawn_blocking(move || with_input_lock(|| multi_select::multi_select(params)))
-            .await
-            .unwrap_or_else(|error| Err(format!("MultiSelect tool panicked: {error}")));
+        let result = tokio::task::spawn_blocking(move || {
+            with_input_lock(|| multi_select::multi_select(params))
+        })
+        .await
+        .unwrap_or_else(|error| Err(format!("MultiSelect tool panicked: {error}")));
         as_call_result(result, audit)
     }
 
@@ -252,9 +260,10 @@ impl WindowsOperationCliServer {
         Parameters(params): Parameters<MultiEditParams>,
     ) -> Result<CallToolResult, McpError> {
         let audit = begin_tool!("MultiEdit");
-        let result = tokio::task::spawn_blocking(move || with_input_lock(|| multi_edit::multi_edit(params)))
-            .await
-            .unwrap_or_else(|error| Err(format!("MultiEdit tool panicked: {error}")));
+        let result =
+            tokio::task::spawn_blocking(move || with_input_lock(|| multi_edit::multi_edit(params)))
+                .await
+                .unwrap_or_else(|error| Err(format!("MultiEdit tool panicked: {error}")));
         as_call_result(result, audit)
     }
 
@@ -373,9 +382,13 @@ impl WindowsOperationCliServer {
         Parameters(params): Parameters<FileSystemParams>,
     ) -> Result<CallToolResult, McpError> {
         let audit = begin_tool!("FileSystem");
-        let message = match tokio::task::spawn_blocking(move || filesystem::file_system(params)).await {
+        let message = match tokio::task::spawn_blocking(move || filesystem::file_system(params))
+            .await
+        {
             Ok(message) => message,
-            Err(error) => return as_call_result(Err(format!("FileSystem tool panicked: {error}")), audit),
+            Err(error) => {
+                return as_call_result(Err(format!("FileSystem tool panicked: {error}")), audit);
+            }
         };
         audit.finish(text_succeeded(&message));
         Ok(CallToolResult::success(vec![ContentBlock::text(message)]))
@@ -392,7 +405,9 @@ impl WindowsOperationCliServer {
         let audit = begin_tool!("Registry");
         let message = match tokio::task::spawn_blocking(move || registry::registry(params)).await {
             Ok(message) => message,
-            Err(error) => return as_call_result(Err(format!("Registry tool panicked: {error}")), audit),
+            Err(error) => {
+                return as_call_result(Err(format!("Registry tool panicked: {error}")), audit);
+            }
         };
         audit.finish(text_succeeded(&message));
         Ok(CallToolResult::success(vec![ContentBlock::text(message)]))
@@ -461,9 +476,15 @@ impl WindowsOperationCliServer {
         Parameters(ClipboardParams { mode, text }): Parameters<ClipboardParams>,
     ) -> Result<CallToolResult, McpError> {
         let audit = begin_tool!("Clipboard");
-        let message = match tokio::task::spawn_blocking(move || with_input_lock(|| clipboard::clipboard(mode, text))).await {
+        let message = match tokio::task::spawn_blocking(move || {
+            with_input_lock(|| clipboard::clipboard(mode, text))
+        })
+        .await
+        {
             Ok(message) => message,
-            Err(error) => return as_call_result(Err(format!("Clipboard tool panicked: {error}")), audit),
+            Err(error) => {
+                return as_call_result(Err(format!("Clipboard tool panicked: {error}")), audit);
+            }
         };
         audit.finish(text_succeeded(&message));
         Ok(CallToolResult::success(vec![ContentBlock::text(message)]))
@@ -482,9 +503,15 @@ impl WindowsOperationCliServer {
         }): Parameters<NotificationParams>,
     ) -> Result<CallToolResult, McpError> {
         let audit = begin_tool!("Notification");
-        let result = match tokio::task::spawn_blocking(move || notification::send_notification(&title, &message, &app_id)).await {
+        let result = match tokio::task::spawn_blocking(move || {
+            notification::send_notification(&title, &message, &app_id)
+        })
+        .await
+        {
             Ok(message) => message,
-            Err(error) => return as_call_result(Err(format!("Notification tool panicked: {error}")), audit),
+            Err(error) => {
+                return as_call_result(Err(format!("Notification tool panicked: {error}")), audit);
+            }
         };
         audit.finish(text_succeeded(&result));
         Ok(CallToolResult::success(vec![ContentBlock::text(result)]))

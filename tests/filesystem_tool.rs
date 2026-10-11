@@ -19,10 +19,8 @@ impl Scratch {
     fn new(name: &str) -> Self {
         static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let unique = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "wocli-fs-{name}-{}-{unique}",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("wocli-fs-{name}-{}-{unique}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("could not create the scratch directory");
         Self(path)
@@ -87,7 +85,10 @@ fn written_text_reads_back_verbatim() {
 
     let read = file_system(params(FileSystemMode::Read, &path));
     assert!(read.contains("日本語の行"), "the read lost content: {read}");
-    assert!(read.contains("line three"), "the read was truncated: {read}");
+    assert!(
+        read.contains("line three"),
+        "the read was truncated: {read}"
+    );
 }
 
 /// `append` has to add to the file, not replace it.
@@ -119,7 +120,10 @@ fn reading_a_range_returns_only_those_lines() {
         limit: Some(2),
         ..params(FileSystemMode::Read, &path)
     });
-    assert!(read.contains("line 3"), "the window missed its start: {read}");
+    assert!(
+        read.contains("line 3"),
+        "the window missed its start: {read}"
+    );
     assert!(read.contains("line 4"), "the window missed its end: {read}");
     assert!(
         !read.contains("line 6"),
@@ -154,7 +158,10 @@ fn a_shift_jis_file_round_trips() {
         encoding: "shift_jis".to_string(),
         ..params(FileSystemMode::Read, &path)
     });
-    assert!(read.contains(text), "the shift_jis file did not read back: {read}");
+    assert!(
+        read.contains(text),
+        "the shift_jis file did not read back: {read}"
+    );
 }
 
 /// `edit` replaces one exact occurrence and leaves the rest alone.
@@ -284,14 +291,20 @@ fn list_and_search_find_the_right_files() {
 
     let listing = file_system(params(FileSystemMode::List, &scratch.join("")));
     for name in ["alpha.txt", "beta.txt", "gamma.log"] {
-        assert!(listing.contains(name), "the listing missed {name}: {listing}");
+        assert!(
+            listing.contains(name),
+            "the listing missed {name}: {listing}"
+        );
     }
 
     let by_glob = file_system(FileSystemParams {
         pattern: Some("*.log".to_string()),
         ..params(FileSystemMode::Search, &scratch.join(""))
     });
-    assert!(by_glob.contains("gamma.log"), "the glob missed its match: {by_glob}");
+    assert!(
+        by_glob.contains("gamma.log"),
+        "the glob missed its match: {by_glob}"
+    );
     assert!(
         !by_glob.contains("alpha.txt"),
         "the glob matched a file it should not have: {by_glob}"
@@ -336,7 +349,6 @@ fn info_describes_the_file() {
         "info did not report a size: {response}"
     );
 }
-
 
 #[test]
 fn overlapping_transfer_paths_leave_the_source_untouched() {
@@ -389,23 +401,36 @@ fn failed_overwrite_preserves_existing_destination() {
     std::fs::create_dir_all(&destination).unwrap();
     std::fs::write(source.join("locked.txt"), "new").unwrap();
     std::fs::write(destination.join("old.txt"), "old").unwrap();
-    let locked = std::fs::OpenOptions::new().read(true).share_mode(0).open(source.join("locked.txt")).unwrap();
+    let locked = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(source.join("locked.txt"))
+        .unwrap();
     let mut request = params(FileSystemMode::Copy, &source.to_string_lossy());
     request.destination = Some(destination.to_string_lossy().into_owned());
     request.overwrite = Some(BoolOrString::Bool(true));
     let result = file_system(request);
     assert!(result.starts_with("Error"), "{result}");
-    assert_eq!(std::fs::read_to_string(destination.join("old.txt")).unwrap(), "old");
+    assert_eq!(
+        std::fs::read_to_string(destination.join("old.txt")).unwrap(),
+        "old"
+    );
     assert!(!destination.join("locked.txt").exists());
     drop(locked);
-    assert_ok(&file_system({
-        let mut request = params(FileSystemMode::Copy, &source.to_string_lossy());
-        request.destination = Some(destination.to_string_lossy().into_owned());
-        request.overwrite = Some(BoolOrString::Bool(true));
-        request
-    }), "replace directory");
+    assert_ok(
+        &file_system({
+            let mut request = params(FileSystemMode::Copy, &source.to_string_lossy());
+            request.destination = Some(destination.to_string_lossy().into_owned());
+            request.overwrite = Some(BoolOrString::Bool(true));
+            request
+        }),
+        "replace directory",
+    );
     assert!(!destination.join("old.txt").exists());
-    assert_eq!(std::fs::read_to_string(destination.join("locked.txt")).unwrap(), "new");
+    assert_eq!(
+        std::fs::read_to_string(destination.join("locked.txt")).unwrap(),
+        "new"
+    );
 }
 
 #[test]
@@ -414,7 +439,11 @@ fn a_failed_move_keeps_both_original_files() {
     let scratch = Scratch::new("failed-move");
     let source = scratch.write("source.txt", "source");
     let destination = scratch.write("destination.txt", "destination");
-    let locked = std::fs::OpenOptions::new().read(true).share_mode(0).open(&source).unwrap();
+    let locked = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(&source)
+        .unwrap();
     let mut request = params(FileSystemMode::Move, &source);
     request.destination = Some(destination.clone());
     request.overwrite = Some(BoolOrString::Bool(true));
@@ -446,9 +475,24 @@ fn invalid_decoding_or_encoding_never_changes_existing_bytes() {
 fn editing_preserves_utf8_and_utf16_byte_order_marks() {
     let scratch = Scratch::new("bom-edit");
     for (name, bom, body, expected) in [
-        ("utf8.txt", vec![0xef, 0xbb, 0xbf], b"old".to_vec(), b"new".to_vec()),
-        ("utf16le.txt", vec![0xff, 0xfe], "old".encode_utf16().flat_map(u16::to_le_bytes).collect(), "new".encode_utf16().flat_map(u16::to_le_bytes).collect()),
-        ("utf16be.txt", vec![0xfe, 0xff], "old".encode_utf16().flat_map(u16::to_be_bytes).collect(), "new".encode_utf16().flat_map(u16::to_be_bytes).collect()),
+        (
+            "utf8.txt",
+            vec![0xef, 0xbb, 0xbf],
+            b"old".to_vec(),
+            b"new".to_vec(),
+        ),
+        (
+            "utf16le.txt",
+            vec![0xff, 0xfe],
+            "old".encode_utf16().flat_map(u16::to_le_bytes).collect(),
+            "new".encode_utf16().flat_map(u16::to_le_bytes).collect(),
+        ),
+        (
+            "utf16be.txt",
+            vec![0xfe, 0xff],
+            "old".encode_utf16().flat_map(u16::to_be_bytes).collect(),
+            "new".encode_utf16().flat_map(u16::to_be_bytes).collect(),
+        ),
     ] {
         let path = scratch.join(name);
         std::fs::write(&path, [bom.as_slice(), body.as_slice()].concat()).unwrap();
@@ -456,7 +500,10 @@ fn editing_preserves_utf8_and_utf16_byte_order_marks() {
         edit.old_text = Some("old".into());
         edit.new_text = Some("new".into());
         assert_ok(&file_system(edit), "BOM edit");
-        assert_eq!(std::fs::read(path).unwrap(), [bom.as_slice(), expected.as_slice()].concat());
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            [bom.as_slice(), expected.as_slice()].concat()
+        );
     }
 }
 
@@ -466,7 +513,10 @@ fn content_search_skips_sensitive_and_oversized_files() {
     scratch.write("normal.txt", "public needle");
     scratch.write(".env", "secret needle");
     scratch.write("private.pem", "private needle");
-    std::fs::File::create(scratch.0.join("large.txt")).unwrap().set_len(10 * 1024 * 1024 + 1).unwrap();
+    std::fs::File::create(scratch.0.join("large.txt"))
+        .unwrap()
+        .set_len(10 * 1024 * 1024 + 1)
+        .unwrap();
     let mut search = params(FileSystemMode::Search, &scratch.0.to_string_lossy());
     search.pattern = Some("*".into());
     search.content_pattern = Some("needle".into());

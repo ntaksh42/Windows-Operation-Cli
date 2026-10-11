@@ -25,9 +25,8 @@ pub fn is_elevated() -> bool {
 /// granted across that boundary on purpose, so it succeeds for an elevated
 /// target and reveals nothing.
 pub fn runs_at_higher_integrity(pid: u32) -> bool {
-    integrity_level(pid).is_some_and(|other| {
-        integrity_level(std::process::id()).is_some_and(|own| other > own)
-    })
+    integrity_level(pid)
+        .is_some_and(|other| integrity_level(std::process::id()).is_some_and(|own| other > own))
 }
 
 /// Reads a process's integrity level (the RID of its token's integrity SID).

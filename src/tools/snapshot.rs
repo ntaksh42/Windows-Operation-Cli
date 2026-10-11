@@ -1400,46 +1400,45 @@ fn capture_inner(
                     selected_rect
                         .as_ref()
                         .is_none_or(|region| rects_intersect(bounds, region))
-                })
-            {
-                dom_found = true;
-                for element in ia2_result.elements {
-                    if element.offscreen
-                        || element.rect.right <= element.rect.left
-                        || element.rect.bottom <= element.rect.top
-                    {
-                        continue;
+                }) {
+                    dom_found = true;
+                    for element in ia2_result.elements {
+                        if element.offscreen
+                            || element.rect.right <= element.rect.left
+                            || element.rect.bottom <= element.rect.top
+                        {
+                            continue;
+                        }
+                        let node = state::ElementNode {
+                            element_id: 0,
+                            parent_id: None,
+                            owner_handle: win.handle,
+                            runtime_id: Vec::new(),
+                            automation_id: String::new(),
+                            supported_actions: Vec::new(),
+                            name: element.name,
+                            control_type: element.control_type,
+                            center: (
+                                element.rect.left + (element.rect.right - element.rect.left) / 2,
+                                element.rect.top + (element.rect.bottom - element.rect.top) / 2,
+                            ),
+                            bounding_box: (
+                                element.rect.left,
+                                element.rect.top,
+                                element.rect.right,
+                                element.rect.bottom,
+                            ),
+                            has_focus: element.focused,
+                        };
+                        let Some(node) = clip_node_to_rect(node, selected_rect.as_ref()) else {
+                            continue;
+                        };
+                        if element.interactive && element.enabled {
+                            local_interactive.push(node);
+                        } else {
+                            local_informative.push(node);
+                        }
                     }
-                    let node = state::ElementNode {
-                        element_id: 0,
-                        parent_id: None,
-                        owner_handle: win.handle,
-                        runtime_id: Vec::new(),
-                        automation_id: String::new(),
-                        supported_actions: Vec::new(),
-                        name: element.name,
-                        control_type: element.control_type,
-                        center: (
-                            element.rect.left + (element.rect.right - element.rect.left) / 2,
-                            element.rect.top + (element.rect.bottom - element.rect.top) / 2,
-                        ),
-                        bounding_box: (
-                            element.rect.left,
-                            element.rect.top,
-                            element.rect.right,
-                            element.rect.bottom,
-                        ),
-                        has_focus: element.focused,
-                    };
-                    let Some(node) = clip_node_to_rect(node, selected_rect.as_ref()) else {
-                        continue;
-                    };
-                    if element.interactive && element.enabled {
-                        local_interactive.push(node);
-                    } else {
-                        local_informative.push(node);
-                    }
-                }
                 }
             }
 
@@ -1850,7 +1849,11 @@ mod tests {
             named_node("More", "button", (136, 40)),
         ];
         dedupe_stacked_nodes(&mut nodes);
-        assert_eq!(nodes.len(), 3, "same-typed neighbours are distinct controls");
+        assert_eq!(
+            nodes.len(),
+            3,
+            "same-typed neighbours are distinct controls"
+        );
     }
 
     #[test]
@@ -1869,7 +1872,10 @@ mod tests {
         // title scored ~47 under whole-string matching and was reported as
         // "Window not found" even though the window was open.
         let windows = vec![
-            snapshot_window(1, "ntaksh42/Windows-Operation-Cli および他 6 ページ - 個人 - Microsoft Edge"),
+            snapshot_window(
+                1,
+                "ntaksh42/Windows-Operation-Cli および他 6 ページ - 個人 - Microsoft Edge",
+            ),
             snapshot_window(2, "Microsoft PC Manager"),
         ];
         let options = ScanOptions::resolve(
@@ -1887,11 +1893,13 @@ mod tests {
         // Both titles contain the query, so both score 100 on partial match.
         // The shorter title is the better answer, not an ambiguity error.
         let windows = vec![
-            snapshot_window(1, "Inbox - Gmail - Mozilla Firefox - Personal - Work Profile"),
+            snapshot_window(
+                1,
+                "Inbox - Gmail - Mozilla Firefox - Personal - Work Profile",
+            ),
             snapshot_window(2, "Gmail"),
         ];
-        let options =
-            ScanOptions::resolve(None, Some("Gmail".to_string()), None).unwrap();
+        let options = ScanOptions::resolve(None, Some("Gmail".to_string()), None).unwrap();
         let selected = select_scan_targets(&options, None, &windows).unwrap();
         assert_eq!(selected.first().map(|w| w.handle), Some(2));
     }
@@ -1920,8 +1928,7 @@ mod tests {
             snapshot_window(1, "Settings"),
             snapshot_window(2, "Settings"),
         ];
-        let options =
-            ScanOptions::resolve(None, Some("Settings".to_string()), None).unwrap();
+        let options = ScanOptions::resolve(None, Some("Settings".to_string()), None).unwrap();
         let error = select_scan_targets(&options, None, &windows).unwrap_err();
         assert!(error.contains("ambiguous"), "{error}");
     }
@@ -2293,10 +2300,7 @@ mod tests {
     fn clickable_point_is_preferred_over_the_geometric_center() {
         let bounds = (0, 0, 100, 40);
         // No provider point: the geometric center stands.
-        assert_eq!(
-            element_center(&raw_element(bounds, None), bounds),
-            (50, 20)
-        );
+        assert_eq!(element_center(&raw_element(bounds, None), bounds), (50, 20));
         // A provider point inside the element wins — this is the case where
         // the center lands on a child or on padding.
         assert_eq!(

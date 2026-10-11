@@ -996,20 +996,38 @@ mod clickable_point_tests {
     fn a_small_plain_button_uses_its_center() {
         // The common case: skipping the cross-process call here is what keeps
         // the cached walk cheap.
-        assert!(!needs_clickable_point(UIA_ButtonControlTypeId.0, &rect(80, 24)));
+        assert!(!needs_clickable_point(
+            UIA_ButtonControlTypeId.0,
+            &rect(80, 24)
+        ));
     }
 
     #[test]
     fn a_large_control_asks_even_when_it_is_not_a_container() {
         // Wide or tall controls put their center in padding or over a child.
-        assert!(needs_clickable_point(UIA_ButtonControlTypeId.0, &rect(200, 24)));
-        assert!(needs_clickable_point(UIA_ButtonControlTypeId.0, &rect(80, 200)));
-        assert!(!needs_clickable_point(UIA_ButtonControlTypeId.0, &rect(199, 199)));
+        assert!(needs_clickable_point(
+            UIA_ButtonControlTypeId.0,
+            &rect(200, 24)
+        ));
+        assert!(needs_clickable_point(
+            UIA_ButtonControlTypeId.0,
+            &rect(80, 200)
+        ));
+        assert!(!needs_clickable_point(
+            UIA_ButtonControlTypeId.0,
+            &rect(199, 199)
+        ));
     }
 
     #[test]
     fn a_degenerate_rect_is_never_probed() {
-        assert!(!needs_clickable_point(UIA_ListItemControlTypeId.0, &rect(0, 20)));
-        assert!(!needs_clickable_point(UIA_ButtonControlTypeId.0, &rect(300, 0)));
+        assert!(!needs_clickable_point(
+            UIA_ListItemControlTypeId.0,
+            &rect(0, 20)
+        ));
+        assert!(!needs_clickable_point(
+            UIA_ButtonControlTypeId.0,
+            &rect(300, 0)
+        ));
     }
 }

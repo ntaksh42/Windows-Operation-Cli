@@ -60,9 +60,7 @@ fn resize_moves_and_sizes_the_named_window() {
     assert!(
         harness.wait_until(Duration::from_secs(5), || {
             window::get_window_rect(harness.hwnd())
-                .is_some_and(|(x, y, width, height)| {
-                    (x, y, width, height) == (120, 90, 500, 380)
-                })
+                .is_some_and(|(x, y, width, height)| (x, y, width, height) == (120, 90, 500, 380))
         }),
         "the window is at {:?}, not (120,90,500x380)",
         window::get_window_rect(harness.hwnd())

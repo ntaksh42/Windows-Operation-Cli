@@ -74,7 +74,8 @@ fn the_table_list_is_a_subset_of_the_scan_list() {
 
     for window in &table {
         assert!(
-            scan.iter().any(|candidate| candidate.handle == window.handle),
+            scan.iter()
+                .any(|candidate| candidate.handle == window.handle),
             "window {:?} ({}) is in the table but was never scanned",
             window.title,
             window.handle

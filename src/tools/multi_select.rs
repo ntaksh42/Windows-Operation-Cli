@@ -45,7 +45,10 @@ pub fn multi_select(params: MultiSelectParams) -> Result<String, String> {
         let labels = labels.into_list()?;
         let total = points.len() + labels.len();
         for label in labels {
-            points.push(InputTarget::from_label(label).map_err(|error| format!("Completed 0 of {total} selections: {error}"))?);
+            points.push(
+                InputTarget::from_label(label)
+                    .map_err(|error| format!("Completed 0 of {total} selections: {error}"))?,
+            );
         }
     }
     if points.is_empty() {
@@ -55,7 +58,9 @@ pub fn multi_select(params: MultiSelectParams) -> Result<String, String> {
     let press_ctrl = opt_bool(&params.press_ctrl, true)?;
     let total = points.len();
     for target in &points {
-        target.resolve().map_err(|error| format!("Completed 0 of {total} selections: {error}"))?;
+        target
+            .resolve()
+            .map_err(|error| format!("Completed 0 of {total} selections: {error}"))?;
     }
 
     let _overlay = crate::overlay::InputOverlay::show();
@@ -68,7 +73,9 @@ pub fn multi_select(params: MultiSelectParams) -> Result<String, String> {
     };
     let mut elements = Vec::new();
     for (index, target) in points.iter().enumerate() {
-        let (x, y) = target.resolve().map_err(|error| format!("Completed {index} of {total} selections: {error}"))?;
+        let (x, y) = target
+            .resolve()
+            .map_err(|error| format!("Completed {index} of {total} selections: {error}"))?;
         input_sim::click_once(x, y, MouseButton::Left, input_sim::input_settle_delay())
             .map_err(|error| format!("Completed {index} of {total} selections: {error}"))?;
         elements.push(format!("({x},{y})"));
@@ -88,7 +95,9 @@ mod tests {
     #[test]
     fn invalid_batch_reports_zero_completed_before_any_input() {
         let result = multi_select(MultiSelectParams {
-            locs: None, labels: Some(ListOrString::List(vec![-1, -2])), press_ctrl: None,
+            locs: None,
+            labels: Some(ListOrString::List(vec![-1, -2])),
+            press_ctrl: None,
         });
         assert!(result.unwrap_err().contains("Completed 0 of 2"));
     }

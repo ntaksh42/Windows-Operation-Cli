@@ -178,5 +178,8 @@ fn wait_for_text_finds_a_plain_label() {
         use_dom: None,
     })
     .expect("WaitFor did not find the label text");
-    assert!(message.contains("satisfied"), "unexpected message: {message}");
+    assert!(
+        message.contains("satisfied"),
+        "unexpected message: {message}"
+    );
 }

@@ -151,13 +151,23 @@ fn click_lands_within_two_pixels() {
     let target = (origin.x + expected.0, origin.y + expected.1);
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     while std::time::Instant::now() < deadline {
-        let hit = unsafe { windows::Win32::UI::WindowsAndMessaging::WindowFromPoint(POINT { x: target.0, y: target.1 }) };
+        let hit = unsafe {
+            windows::Win32::UI::WindowsAndMessaging::WindowFromPoint(POINT {
+                x: target.0,
+                y: target.1,
+            })
+        };
         if hit.0 as isize == hwnd {
             break;
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    let hit = unsafe { windows::Win32::UI::WindowsAndMessaging::WindowFromPoint(POINT { x: target.0, y: target.1 }) };
+    let hit = unsafe {
+        windows::Win32::UI::WindowsAndMessaging::WindowFromPoint(POINT {
+            x: target.0,
+            y: target.1,
+        })
+    };
     if hit.0 as isize != hwnd {
         // Something else owns the pixel this test would click, so the
         // measurement would describe that window rather than this one. That is

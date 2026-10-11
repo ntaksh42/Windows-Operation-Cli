@@ -118,7 +118,10 @@ async fn scrape_dom(url: &str) -> Result<(String, bool), String> {
 }
 
 fn dom_source_notice(title: Option<&str>) -> String {
-    format!("Source: foreground window {:?} (DOM; requested URL not verified)", title.unwrap_or("unknown"))
+    format!(
+        "Source: foreground window {:?} (DOM; requested URL not verified)",
+        title.unwrap_or("unknown")
+    )
 }
 
 async fn sample_content(
@@ -205,23 +208,43 @@ async fn fetch_markdown(url: &str) -> Result<String, String> {
         return Err(format!("Error: HTTP error for {current}: {status}"));
     }
 
-    if response.content_length().is_some_and(|length| length > MAX_BODY_BYTES as u64) {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_BODY_BYTES as u64)
+    {
         return Err("Error: Response body exceeds the 5 MiB limit".to_string());
     }
-    let content_type = response.headers().get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok()).unwrap_or("").to_string();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_string();
     let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await
-        .map_err(|e| format!("Error: Failed to read response body from {current}: {e}"))? {
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| format!("Error: Failed to read response body from {current}: {e}"))?
+    {
         if bytes.len().saturating_add(chunk.len()) > MAX_BODY_BYTES {
             return Err("Error: Response body exceeds the 5 MiB limit".to_string());
         }
         bytes.extend_from_slice(&chunk);
     }
-    let encoding = content_type.split(';').skip(1).find_map(|parameter| {
-        let (name, value) = parameter.trim().split_once('=')?;
-        name.eq_ignore_ascii_case("charset").then(|| encoding_rs::Encoding::for_label(value.trim().trim_matches(['\'', '"']).as_bytes())).flatten()
-    }).unwrap_or(encoding_rs::UTF_8);
+    let encoding = content_type
+        .split(';')
+        .skip(1)
+        .find_map(|parameter| {
+            let (name, value) = parameter.trim().split_once('=')?;
+            name.eq_ignore_ascii_case("charset")
+                .then(|| {
+                    encoding_rs::Encoding::for_label(
+                        value.trim().trim_matches(['\'', '"']).as_bytes(),
+                    )
+                })
+                .flatten()
+        })
+        .unwrap_or(encoding_rs::UTF_8);
     let html = encoding.decode(&bytes).0;
     let converter = htmd::HtmlToMarkdown::builder()
         .skip_tags(vec!["script", "style"])

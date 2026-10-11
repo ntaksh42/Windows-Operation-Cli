@@ -33,10 +33,8 @@ impl Notepad {
     /// Opens Notepad on a file the test owns, so nothing the user has open is
     /// touched and no save dialog is ever needed.
     fn open(name: &str) -> Option<Self> {
-        let file = std::env::temp_dir().join(format!(
-            "wocli-notepad-{}-{name}.txt",
-            std::process::id()
-        ));
+        let file =
+            std::env::temp_dir().join(format!("wocli-notepad-{}-{name}.txt", std::process::id()));
         std::fs::write(&file, "").ok()?;
 
         let child = Command::new("notepad.exe").arg(&file).spawn().ok()?;
@@ -208,7 +206,10 @@ fn long_text_arrives_whole_in_a_real_editor() {
             let held = windows_operation_cli::uia::focused_element_value()
                 .map(|v| v.chars().count())
                 .unwrap_or(0);
-            panic!("the editor holds {held} characters, expected {}", text.chars().count());
+            panic!(
+                "the editor holds {held} characters, expected {}",
+                text.chars().count()
+            );
         }
         std::thread::sleep(Duration::from_millis(200));
     }

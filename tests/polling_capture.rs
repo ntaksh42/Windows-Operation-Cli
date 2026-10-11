@@ -115,7 +115,12 @@ fn the_full_capture_still_renders_its_response_text() {
         .expect("the test window never reached the foreground");
 
     let full = capture(&polling_params()).expect("full capture failed");
-    for section in ["Cursor Position:", "Focused Window:", "Opened Windows:", "UI Tree:"] {
+    for section in [
+        "Cursor Position:",
+        "Focused Window:",
+        "Opened Windows:",
+        "UI Tree:",
+    ] {
         assert!(
             full.text.contains(section),
             "the full capture dropped the {section:?} section"

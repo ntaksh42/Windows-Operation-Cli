@@ -34,7 +34,10 @@ fn wait_until_point_belongs_to(hwnd: isize, x: i32, y: i32, timeout: Duration) -
         }
         if Instant::now() >= deadline {
             let hit = unsafe { WindowFromPoint(POINT { x, y }) };
-            eprintln!("point ({x},{y}) is owned by {:#x}, expected {hwnd:#x}", hit.0 as isize);
+            eprintln!(
+                "point ({x},{y}) is owned by {:#x}, expected {hwnd:#x}",
+                hit.0 as isize
+            );
             return false;
         }
         std::thread::sleep(Duration::from_millis(50));

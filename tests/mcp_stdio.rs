@@ -36,7 +36,8 @@ impl McpServer {
         std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 if let Ok(message) = serde_json::from_str::<Value>(&line)
-                    && sender.send(message).is_err() {
+                    && sender.send(message).is_err()
+                {
                     break;
                 }
             }
@@ -76,7 +77,11 @@ impl McpServer {
     }
 
     fn call_tool(&mut self, id: u64, name: &str, arguments: Value) -> Value {
-        self.request(id, "tools/call", json!({"name": name, "arguments": arguments}))
+        self.request(
+            id,
+            "tools/call",
+            json!({"name": name, "arguments": arguments}),
+        )
     }
 }
 
@@ -143,13 +148,19 @@ fn mcp_contract_preserves_business_errors_and_rejects_invalid_requests() {
     );
     assert!(read.get("error").is_none(), "{read}");
     assert_eq!(read["result"]["isError"], json!(false), "{read}");
-    assert!(result_text(&read).contains("Error: File not found"), "{read}");
+    assert!(
+        result_text(&read).contains("Error: File not found"),
+        "{read}"
+    );
 
     let timeout = server.call_tool(5, "Snapshot", json!({"timeout_ms": 1}));
     assert_tool_error(&timeout, "timeout_ms");
 
-    let dom_without_tree =
-        server.call_tool(6, "Snapshot", json!({"use_dom": true, "use_ui_tree": false}));
+    let dom_without_tree = server.call_tool(
+        6,
+        "Snapshot",
+        json!({"use_dom": true, "use_ui_tree": false}),
+    );
     assert_tool_error(&dom_without_tree, "requires use_ui_tree");
 
     let screenshot = server.call_tool(

@@ -49,7 +49,11 @@ fn a_surrogate_pair_arrives_as_one_character() {
     // U+1F600, above the BMP: one char, two code units.
     let text = "ok 😀";
     assert_eq!(text.chars().count(), 4);
-    assert_eq!(text.encode_utf16().count(), 5, "the emoji is a surrogate pair");
+    assert_eq!(
+        text.encode_utf16().count(),
+        5,
+        "the emoji is a surrogate pair"
+    );
 
     round_trip(&app, text, "emoji");
 }
@@ -74,7 +78,11 @@ fn mixed_scripts_survive_together() {
     let Some(app) = app("Unicode Mixed") else {
         return;
     };
-    round_trip(&app, "abc 日本語 Ελληνικά Кириллица 😀 end", "mixed scripts");
+    round_trip(
+        &app,
+        "abc 日本語 Ελληνικά Кириллица 😀 end",
+        "mixed scripts",
+    );
 }
 
 /// A combining mark is a separate `char` that renders onto the one before it.

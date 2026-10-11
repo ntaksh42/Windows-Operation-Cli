@@ -163,7 +163,9 @@ unsafe fn raise(hwnd: HWND) {
         let _ = AllowSetForegroundWindow(ASFW_ANY);
         let mut attached = Vec::new();
         for thread in [foreground_thread, target] {
-            if thread != 0 && thread != current && AttachThreadInput(current, thread, true).as_bool()
+            if thread != 0
+                && thread != current
+                && AttachThreadInput(current, thread, true).as_bool()
             {
                 attached.push(thread);
             }

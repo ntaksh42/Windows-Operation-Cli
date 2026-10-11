@@ -123,7 +123,10 @@ fn multi_edit_without_targets_is_rejected() {
         labels: None,
     })
     .expect_err("multi_edit with no targets should fail");
-    assert!(error.contains("locs or labels"), "unexpected error: {error}");
+    assert!(
+        error.contains("locs or labels"),
+        "unexpected error: {error}"
+    );
 }
 
 /// `MultiSelect` clicks each point in turn; with Ctrl held the listbox keeps
@@ -176,7 +179,10 @@ fn multi_select_without_targets_is_rejected() {
         press_ctrl: None,
     })
     .expect_err("multi_select with no targets should fail");
-    assert!(error.contains("locs or labels"), "unexpected error: {error}");
+    assert!(
+        error.contains("locs or labels"),
+        "unexpected error: {error}"
+    );
 }
 
 /// A malformed coordinate is rejected before any click is sent.

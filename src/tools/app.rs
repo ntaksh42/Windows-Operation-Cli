@@ -234,7 +234,10 @@ fn switch(name: Option<&str>) -> Outcome {
         crate::window::root_window(window.handle) != crate::window::root_window(target.handle)
     }) {
         if std::time::Instant::now() >= deadline {
-            return (format!("Could not bring {} to the foreground.", target.title), None);
+            return (
+                format!("Could not bring {} to the foreground.", target.title),
+                None,
+            );
         }
         std::thread::sleep(Duration::from_millis(20));
     }

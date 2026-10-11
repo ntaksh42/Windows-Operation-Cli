@@ -201,10 +201,28 @@ unsafe fn walk(
     for child_variant in children.iter().take(obtained.max(0) as usize) {
         if let Some(dispatch) = dispatch_from_variant(child_variant) {
             if let Ok(child_accessible) = dispatch.cast::<IAccessible>() {
-                unsafe { walk(&child_accessible, &variant_i4(0), in_document, result, budget, depth + 1) };
+                unsafe {
+                    walk(
+                        &child_accessible,
+                        &variant_i4(0),
+                        in_document,
+                        result,
+                        budget,
+                        depth + 1,
+                    )
+                };
             }
         } else if variant_type(child_variant) == VT_I4 {
-            unsafe { walk(accessible, child_variant, in_document, result, budget, depth + 1) };
+            unsafe {
+                walk(
+                    accessible,
+                    child_variant,
+                    in_document,
+                    result,
+                    budget,
+                    depth + 1,
+                )
+            };
         }
         if budget.truncated {
             break;
@@ -216,9 +234,15 @@ pub fn walk_firefox(hwnd: HWND) -> Result<Ia2Result, String> {
     walk_firefox_with_deadline(hwnd, Instant::now() + Duration::from_secs(2))
 }
 
-pub(crate) fn walk_firefox_with_deadline(hwnd: HWND, deadline: Instant) -> Result<Ia2Result, String> {
+pub(crate) fn walk_firefox_with_deadline(
+    hwnd: HWND,
+    deadline: Instant,
+) -> Result<Ia2Result, String> {
     if Instant::now() >= deadline {
-        return Ok(Ia2Result { truncated: true, ..Default::default() });
+        return Ok(Ia2Result {
+            truncated: true,
+            ..Default::default()
+        });
     }
     unsafe {
         let mut raw = std::ptr::null_mut();
@@ -229,8 +253,19 @@ pub(crate) fn walk_firefox_with_deadline(hwnd: HWND, deadline: Instant) -> Resul
         }
         let accessible = IAccessible::from_raw(raw);
         let mut result = Ia2Result::default();
-        let mut budget = WalkBudget { visited: 0, deadline, truncated: false };
-        walk(&accessible, &variant_i4(0), false, &mut result, &mut budget, 0);
+        let mut budget = WalkBudget {
+            visited: 0,
+            deadline,
+            truncated: false,
+        };
+        walk(
+            &accessible,
+            &variant_i4(0),
+            false,
+            &mut result,
+            &mut budget,
+            0,
+        );
         result.truncated |= budget.truncated;
         Ok(result)
     }
@@ -242,8 +277,14 @@ mod tests {
 
     #[test]
     fn unnamed_nodes_depth_and_deadline_are_bounded() {
-        let mut budget = WalkBudget { visited: 0, deadline: Instant::now() + Duration::from_secs(1), truncated: false };
-        for _ in 0..MAX_NODES { assert!(budget.visit(0)); }
+        let mut budget = WalkBudget {
+            visited: 0,
+            deadline: Instant::now() + Duration::from_secs(1),
+            truncated: false,
+        };
+        for _ in 0..MAX_NODES {
+            assert!(budget.visit(0));
+        }
         assert!(!budget.visit(0));
         budget.visited = 0;
         assert!(!budget.visit(MAX_DEPTH));

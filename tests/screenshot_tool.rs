@@ -42,7 +42,10 @@ fn lit_fraction(png: &[u8]) -> f64 {
 #[ignore = "requires an interactive Windows desktop session; run with --ignored"]
 fn a_screenshot_contains_the_desktop() {
     let output = screenshot(&params()).expect("screenshot failed");
-    assert!(!output.png_bytes.is_empty(), "the response carried no image");
+    assert!(
+        !output.png_bytes.is_empty(),
+        "the response carried no image"
+    );
 
     let lit = lit_fraction(&output.png_bytes);
     assert!(
@@ -80,11 +83,7 @@ fn consecutive_screenshots_are_all_real() {
     for attempt in 0..3 {
         let output = screenshot(&params()).expect("screenshot failed");
         let lit = lit_fraction(&output.png_bytes);
-        assert!(
-            lit > 0.5,
-            "capture {attempt} is {:.1}% lit",
-            lit * 100.0
-        );
+        assert!(lit > 0.5, "capture {attempt} is {:.1}% lit", lit * 100.0);
     }
 }
 

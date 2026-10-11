@@ -152,7 +152,12 @@ fn the_named_shell_can_be_run() {
     };
 
     let output = std::process::Command::new(shell)
-        .args(["-NoProfile", "-NonInteractive", "-Command", "Write-Output ok"])
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Write-Output ok",
+        ])
         .output()
         .unwrap_or_else(|error| panic!("Doctor named {shell:?} but it could not be run: {error}"));
     assert!(

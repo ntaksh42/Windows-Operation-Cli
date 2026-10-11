@@ -35,13 +35,18 @@ pub fn multi_edit(params: MultiEditParams) -> Result<String, String> {
 
     let mut entries: Vec<(InputTarget, String)> = Vec::new();
     if let Some(locs) = params.locs {
-        entries.extend(locs.into_list()?.into_iter().map(|(x, y, text)| (InputTarget::Point(x, y), text)));
+        entries.extend(
+            locs.into_list()?
+                .into_iter()
+                .map(|(x, y, text)| (InputTarget::Point(x, y), text)),
+        );
     }
     if let Some(labels) = params.labels {
         let labels = labels.into_list()?;
         let total = entries.len() + labels.len();
         for (label, text) in labels {
-            let target = InputTarget::from_label(label).map_err(|error| format!("Completed 0 of {total} edits: {error}"))?;
+            let target = InputTarget::from_label(label)
+                .map_err(|error| format!("Completed 0 of {total} edits: {error}"))?;
             entries.push((target, text));
         }
     }
@@ -51,7 +56,9 @@ pub fn multi_edit(params: MultiEditParams) -> Result<String, String> {
 
     let total = entries.len();
     for (target, _) in &entries {
-        target.resolve().map_err(|error| format!("Completed 0 of {total} edits: {error}"))?;
+        target
+            .resolve()
+            .map_err(|error| format!("Completed 0 of {total} edits: {error}"))?;
     }
     let _overlay = crate::overlay::InputOverlay::show();
     let mut elements = Vec::new();
@@ -66,10 +73,17 @@ pub fn multi_edit(params: MultiEditParams) -> Result<String, String> {
             // before taking focus somewhere else.
             std::thread::sleep(field_settle_delay());
         }
-        let (x, y) = target.resolve().map_err(|error| format!("Completed {index} of {total} edits: {error}"))?;
+        let (x, y) = target
+            .resolve()
+            .map_err(|error| format!("Completed {index} of {total} edits: {error}"))?;
         let warning = typing::type_at_report(x, y, text, CaretPosition::Idle, true, false)
             .map_err(|error| format!("Completed {index} of {total} edits; current field may be partially modified: {error}"))?;
-        elements.push(format!("({x},{y}) with text '{text}'{}", warning.map(|warning| format!(" ({warning})")).unwrap_or_default()));
+        elements.push(format!(
+            "({x},{y}) with text '{text}'{}",
+            warning
+                .map(|warning| format!(" ({warning})"))
+                .unwrap_or_default()
+        ));
     }
 
     Ok(format!("Multi-edited elements at: {}", elements.join(", ")))
@@ -81,7 +95,8 @@ mod tests {
     #[test]
     fn invalid_batch_reports_zero_completed_before_any_input() {
         let result = multi_edit(MultiEditParams {
-            locs: None, labels: Some(ListOrString::List(vec![(-1, "a".into()), (-2, "b".into())])),
+            locs: None,
+            labels: Some(ListOrString::List(vec![(-1, "a".into()), (-2, "b".into())])),
         });
         assert!(result.unwrap_err().contains("Completed 0 of 2"));
     }

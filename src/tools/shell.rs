@@ -33,7 +33,9 @@ pub fn response_succeeded(response: &str) -> bool {
 mod tests {
     #[test]
     fn command_output_cannot_spoof_the_exit_status() {
-        assert!(!super::response_succeeded("Response: Status Code: 0\nStatus Code: 1"));
+        assert!(!super::response_succeeded(
+            "Response: Status Code: 0\nStatus Code: 1"
+        ));
         assert!(super::response_succeeded("Response: done\nStatus Code: 0"));
     }
 }

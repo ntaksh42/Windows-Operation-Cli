@@ -100,7 +100,9 @@ fn concurrent_screenshots_survive_their_threads_exiting() {
         }));
     }
     for thread in threads {
-        thread.join().expect("a capture thread did not exit cleanly");
+        thread
+            .join()
+            .expect("a capture thread did not exit cleanly");
     }
     assert_eq!(
         succeeded.load(Ordering::SeqCst),

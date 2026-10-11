@@ -68,10 +68,30 @@ unsafe extern "system" fn wnd_proc(
                 let _ = windows::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut rc);
                 // Four edges; the interior keeps the color key and stays see-through.
                 let edges = [
-                    RECT { left: rc.left, top: rc.top, right: rc.right, bottom: rc.top + BORDER_PX },
-                    RECT { left: rc.left, top: rc.bottom - BORDER_PX, right: rc.right, bottom: rc.bottom },
-                    RECT { left: rc.left, top: rc.top, right: rc.left + BORDER_PX, bottom: rc.bottom },
-                    RECT { left: rc.right - BORDER_PX, top: rc.top, right: rc.right, bottom: rc.bottom },
+                    RECT {
+                        left: rc.left,
+                        top: rc.top,
+                        right: rc.right,
+                        bottom: rc.top + BORDER_PX,
+                    },
+                    RECT {
+                        left: rc.left,
+                        top: rc.bottom - BORDER_PX,
+                        right: rc.right,
+                        bottom: rc.bottom,
+                    },
+                    RECT {
+                        left: rc.left,
+                        top: rc.top,
+                        right: rc.left + BORDER_PX,
+                        bottom: rc.bottom,
+                    },
+                    RECT {
+                        left: rc.right - BORDER_PX,
+                        top: rc.top,
+                        right: rc.right,
+                        bottom: rc.bottom,
+                    },
                 ];
                 for edge in &edges {
                     FillRect(hdc, edge, brush);

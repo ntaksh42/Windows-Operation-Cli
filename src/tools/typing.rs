@@ -85,7 +85,9 @@ pub fn type_text(params: TypeParams) -> Result<String, String> {
     let caret_position = params.caret_position.unwrap_or(CaretPosition::Idle);
 
     let warning = type_at_report(x, y, &params.text, caret_position, clear, press_enter)?;
-    let warning = warning.map(|warning| format!("\n{warning}")).unwrap_or_default();
+    let warning = warning
+        .map(|warning| format!("\n{warning}"))
+        .unwrap_or_default();
     Ok(format!("Typed {} at ({x},{y}).{warning}", params.text))
 }
 
@@ -103,7 +105,12 @@ pub fn type_at(
 }
 
 pub(crate) fn type_at_report(
-    x: i32, y: i32, text: &str, caret_position: CaretPosition, clear: bool, press_enter: bool,
+    x: i32,
+    y: i32,
+    text: &str,
+    caret_position: CaretPosition,
+    clear: bool,
+    press_enter: bool,
 ) -> Result<Option<&'static str>, String> {
     input_sim::click_once(x, y, MouseButton::Left, input_sim::input_settle_delay())?;
 
@@ -117,15 +124,26 @@ pub(crate) fn type_at_report(
         clear_focused_text()?;
     }
 
-    let outcome = if should_paste(text) { paste_text(text)? } else { PasteOutcome::NotLanded };
+    let outcome = if should_paste(text) {
+        paste_text(text)?
+    } else {
+        PasteOutcome::NotLanded
+    };
     let warning = match outcome {
         PasteOutcome::Landed => None,
         PasteOutcome::NotLanded => {
             input_sim::type_text_char_by_char(text, TYPE_INTERVAL, KEY_WAIT)?;
             None
         }
-        PasteOutcome::Partial => return Err("Paste was only partially confirmed; text was not resent to avoid duplication.".to_string()),
-        PasteOutcome::Unverified => Some("Input warning: paste delivery could not be verified; text was not resent."),
+        PasteOutcome::Partial => {
+            return Err(
+                "Paste was only partially confirmed; text was not resent to avoid duplication."
+                    .to_string(),
+            );
+        }
+        PasteOutcome::Unverified => {
+            Some("Input warning: paste delivery could not be verified; text was not resent.")
+        }
     };
 
     if press_enter {
@@ -157,16 +175,30 @@ const PASTE_CONFIRM_TIMEOUT: Duration = Duration::from_millis(400);
 const PASTE_CONFIRM_INTERVAL: Duration = Duration::from_millis(25);
 
 #[derive(Debug, PartialEq, Eq)]
-enum PasteOutcome { Landed, NotLanded, Partial, Unverified }
+enum PasteOutcome {
+    Landed,
+    NotLanded,
+    Partial,
+    Unverified,
+}
 
 fn paste_text(text: &str) -> Result<PasteOutcome, String> {
     let before = crate::uia::focused_element_value();
-    let Some(clipboard) = input_sim::PasteClipboard::prepare(text)? else { return Ok(PasteOutcome::NotLanded); };
+    let Some(clipboard) = input_sim::PasteClipboard::prepare(text)? else {
+        return Ok(PasteOutcome::NotLanded);
+    };
     std::thread::sleep(PASTE_SETTLE_WAIT);
     let paste_result = input_sim::chord(&[VK_CONTROL.0, b'V' as u16], KEY_WAIT);
     let outcome = if paste_result.is_ok() {
-        wait_for_pasted_text(text, before.as_deref(), PASTE_CONFIRM_TIMEOUT, crate::uia::focused_element_value)
-    } else { PasteOutcome::Unverified };
+        wait_for_pasted_text(
+            text,
+            before.as_deref(),
+            PASTE_CONFIRM_TIMEOUT,
+            crate::uia::focused_element_value,
+        )
+    } else {
+        PasteOutcome::Unverified
+    };
     let restored = clipboard.finish();
     paste_result?;
     restored?;
@@ -174,22 +206,35 @@ fn paste_text(text: &str) -> Result<PasteOutcome, String> {
 }
 
 fn wait_for_pasted_text(
-    text: &str, before: Option<&str>, timeout: Duration,
+    text: &str,
+    before: Option<&str>,
+    timeout: Duration,
     mut read_value: impl FnMut() -> Option<String>,
 ) -> PasteOutcome {
     let deadline = std::time::Instant::now() + timeout;
     let previous_count = before.map_or(0, |value| value.matches(text).count());
     let mut changed = false;
     loop {
-        let Some(value) = read_value() else { return PasteOutcome::Unverified; };
-        if value.matches(text).count() > previous_count { return PasteOutcome::Landed; }
+        let Some(value) = read_value() else {
+            return PasteOutcome::Unverified;
+        };
+        if value.matches(text).count() > previous_count {
+            return PasteOutcome::Landed;
+        }
         changed |= Some(value.as_str()) != before;
         if std::time::Instant::now() >= deadline {
-            return if changed { PasteOutcome::Partial }
-                else if previous_count > 0 || before.is_none() { PasteOutcome::Unverified }
-                else { PasteOutcome::NotLanded };
+            return if changed {
+                PasteOutcome::Partial
+            } else if previous_count > 0 || before.is_none() {
+                PasteOutcome::Unverified
+            } else {
+                PasteOutcome::NotLanded
+            };
         }
-        std::thread::sleep(PASTE_CONFIRM_INTERVAL.min(deadline.saturating_duration_since(std::time::Instant::now())));
+        std::thread::sleep(
+            PASTE_CONFIRM_INTERVAL
+                .min(deadline.saturating_duration_since(std::time::Instant::now())),
+        );
     }
 }
 
@@ -199,9 +244,16 @@ mod tests {
 
     #[test]
     fn paste_confirmation_does_not_trust_existing_or_partial_text() {
-        let poll = |before, value: Option<&str>| wait_for_pasted_text("hello", before, Duration::ZERO, || value.map(str::to_string));
+        let poll = |before, value: Option<&str>| {
+            wait_for_pasted_text("hello", before, Duration::ZERO, || {
+                value.map(str::to_string)
+            })
+        };
         assert_eq!(poll(Some("hello"), Some("hello")), PasteOutcome::Unverified);
-        assert_eq!(poll(Some("hello"), Some("hellohello")), PasteOutcome::Landed);
+        assert_eq!(
+            poll(Some("hello"), Some("hellohello")),
+            PasteOutcome::Landed
+        );
         assert_eq!(poll(Some(""), Some("he")), PasteOutcome::Partial);
         assert_eq!(poll(Some(""), Some("")), PasteOutcome::NotLanded);
         assert_eq!(poll(Some(""), None), PasteOutcome::Unverified);

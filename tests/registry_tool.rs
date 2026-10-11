@@ -85,7 +85,13 @@ fn a_written_value_reads_back() {
         "set failed: {written}"
     );
 
-    let read = call(RegistryMode::Get, &scratch.path, Some("Greeting"), None, RegistryValueType::String);
+    let read = call(
+        RegistryMode::Get,
+        &scratch.path,
+        Some("Greeting"),
+        None,
+        RegistryValueType::String,
+    );
     assert!(
         read.contains("こんにちは"),
         "the value did not read back: {read}"
@@ -106,7 +112,13 @@ fn a_dword_keeps_its_type() {
         Some("42"),
         RegistryValueType::DWord,
     );
-    let read = call(RegistryMode::Get, &scratch.path, Some("Count"), None, RegistryValueType::String);
+    let read = call(
+        RegistryMode::Get,
+        &scratch.path,
+        Some("Count"),
+        None,
+        RegistryValueType::String,
+    );
     assert!(read.contains("42"), "the DWORD did not read back: {read}");
 }
 
@@ -126,9 +138,18 @@ fn list_shows_the_values_under_a_key() {
         );
     }
 
-    let listing = call(RegistryMode::List, &scratch.path, None, None, RegistryValueType::String);
+    let listing = call(
+        RegistryMode::List,
+        &scratch.path,
+        None,
+        None,
+        RegistryValueType::String,
+    );
     assert!(listing.contains("First"), "listing missed First: {listing}");
-    assert!(listing.contains("Second"), "listing missed Second: {listing}");
+    assert!(
+        listing.contains("Second"),
+        "listing missed Second: {listing}"
+    );
 }
 
 /// Deleting has to remove the value, and reading it afterwards has to fail

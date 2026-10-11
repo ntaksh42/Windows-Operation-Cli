@@ -147,23 +147,36 @@ fn resolve_key_parts(token: &str) -> Result<(u16, Vec<u16>), String> {
 
     let lower = trimmed.to_ascii_lowercase();
     let upper = alias(&lower).to_ascii_uppercase();
-    named_vk(&upper).map(|key| (key, Vec::new())).ok_or_else(|| format!("Unknown shortcut key: {token:?}"))
+    named_vk(&upper)
+        .map(|key| (key, Vec::new()))
+        .ok_or_else(|| format!("Unknown shortcut key: {token:?}"))
 }
 
 fn decode_scan(scan: i16) -> (u16, Vec<u16>) {
     let scan = scan as u16;
     let mut modifiers = Vec::new();
     for (bit, key) in [(1, 0x10), (2, 0x11), (4, 0x12)] {
-        if (scan >> 8) & bit != 0 { modifiers.push(key); }
+        if (scan >> 8) & bit != 0 {
+            modifiers.push(key);
+        }
     }
     (scan & 0xFF, modifiers)
 }
 
 pub fn resolve_chord(shortcut: &str) -> Result<Vec<u16>, String> {
-    let parts: Vec<_> = shortcut.split('+').map(resolve_key_parts).collect::<Result<_, _>>()?;
+    let parts: Vec<_> = shortcut
+        .split('+')
+        .map(resolve_key_parts)
+        .collect::<Result<_, _>>()?;
     let mut keys = Vec::new();
-    for key in parts.iter().flat_map(|(_, modifiers)| modifiers.iter().copied()).chain(parts.iter().map(|(key, _)| *key)) {
-        if !keys.contains(&key) { keys.push(key); }
+    for key in parts
+        .iter()
+        .flat_map(|(_, modifiers)| modifiers.iter().copied())
+        .chain(parts.iter().map(|(key, _)| *key))
+    {
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
     }
     Ok(keys)
 }
@@ -177,7 +190,10 @@ mod tests {
         assert_eq!(decode_scan(0x073f), (0x3f, vec![0x10, 0x11, 0x12]));
         assert_eq!(decode_scan(0x013f), (0x3f, vec![0x10]));
         assert!(resolve_chord("ctrl+\u{1F600}").is_err());
-        assert_eq!(resolve_chord("ctrl+ctrl+c").unwrap(), vec![0x11, b'C' as u16]);
+        assert_eq!(
+            resolve_chord("ctrl+ctrl+c").unwrap(),
+            vec![0x11, b'C' as u16]
+        );
     }
 
     #[test]
@@ -226,8 +242,7 @@ mod tests {
     #[test]
     fn a_missing_key_between_separators_is_rejected() {
         for shortcut in ["ctrl+", "+c", "ctrl++", ""] {
-            let parsed: Result<Vec<u16>, String> =
-                shortcut.split('+').map(resolve_key).collect();
+            let parsed: Result<Vec<u16>, String> = shortcut.split('+').map(resolve_key).collect();
             assert!(
                 parsed.is_err(),
                 "{shortcut:?} should be rejected, got {parsed:?}"

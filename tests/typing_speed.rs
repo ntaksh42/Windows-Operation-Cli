@@ -88,7 +88,11 @@ fn json_text_arrives_verbatim_and_quickly() {
 
     let json = r#"{"name": "test", "count": 42}"#;
     let elapsed = type_into_edit(&app, json);
-    eprintln!("{} characters of JSON took {:.0}ms", json.len(), elapsed.as_millis());
+    eprintln!(
+        "{} characters of JSON took {:.0}ms",
+        json.len(),
+        elapsed.as_millis()
+    );
     assert!(
         elapsed < Duration::from_millis(900),
         "JSON delivery took {:.0}ms; braces should not force the slow path",
