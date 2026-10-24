@@ -51,6 +51,7 @@ pub struct ClickParams {
 
 /// Performs `clicks` clicks with `button` at the resolved location.
 pub fn click(params: ClickParams) -> Result<String, String> {
+    crate::background::ensure_input_allowed("Click")?;
     let (x, y) = resolve_point_required(params.loc, params.label)?;
     let button = params.button.unwrap_or(ClickButton::Left);
     let clicks = params.clicks.unwrap_or(1);

@@ -76,6 +76,9 @@ pub struct TypeParams {
 /// Types `text` at the resolved location and returns the confirmation
 /// message.
 pub fn type_text(params: TypeParams) -> Result<String, String> {
+    if crate::background::reason().is_some() {
+        return type_in_background(&params);
+    }
     // Tell the human the desktop is being driven; concurrent manual input
     // steals focus and breaks the capture path.
     let _overlay = crate::overlay::InputOverlay::show();
@@ -89,6 +92,57 @@ pub fn type_text(params: TypeParams) -> Result<String, String> {
         .map(|warning| format!("\n{warning}"))
         .unwrap_or_default();
     Ok(format!("Typed {} at ({x},{y}).{warning}", params.text))
+}
+
+/// Background-mode `Type`: sets the labelled field's value through UI
+/// Automation instead of clicking and sending keys.
+fn type_in_background(params: &TypeParams) -> Result<String, String> {
+    let label = params.label.ok_or_else(|| {
+        "Background mode types through UI Automation, which needs a label from Snapshot; \
+         loc coordinates would need mouse and keyboard input."
+            .to_string()
+    })?;
+    if opt_bool(&params.press_enter, false)? {
+        return Err(
+            "press_enter needs keyboard input, which background mode does not send. \
+                    Invoke the submit button with InvokeElement instead."
+                .to_string(),
+        );
+    }
+    let clear = opt_bool(&params.clear, false)?;
+    let edit = background_edit(clear, params.caret_position.unwrap_or(CaretPosition::Idle));
+    let node = crate::tools::support::resolve_label_value(label)?;
+    let value = set_value_report(&node, &params.text, edit)?;
+    Ok(format!(
+        "Typed {} into element {label} (background mode). {value}",
+        params.text
+    ))
+}
+
+/// How background mode applies `clear` and `caret_position`: there is no caret
+/// to place, so `idle` appends like `end`.
+pub(crate) fn background_edit(clear: bool, caret: CaretPosition) -> crate::uia::ValueEdit {
+    use crate::uia::ValueEdit;
+    match (clear, caret) {
+        (true, _) => ValueEdit::Replace,
+        (false, CaretPosition::Start) => ValueEdit::Prepend,
+        (false, _) => ValueEdit::Append,
+    }
+}
+
+/// Sets the value and describes what the field holds afterwards.
+pub(crate) fn set_value_report(
+    node: &crate::state::ElementNode,
+    text: &str,
+    edit: crate::uia::ValueEdit,
+) -> Result<String, String> {
+    let value = crate::uia::set_element_value(node, text, edit)?;
+    let shown: String = value.chars().take(120).collect();
+    Ok(if value.contains(text) {
+        format!("Field now holds {shown:?}.")
+    } else {
+        format!("Input warning: the field reports {shown:?}, which does not contain the text.")
+    })
 }
 
 /// Core typing sequence shared by the `Type` tool and `MultiEdit`: focus via
@@ -281,6 +335,27 @@ mod tests {
         // which a clipboard paste cannot reproduce.
         assert!(!should_paste("a line that is plenty long\nand another"));
         assert!(!should_paste("a value that is plenty long\tnext field"));
+    }
+
+    #[test]
+    fn background_edit_follows_clear_then_caret() {
+        use crate::uia::ValueEdit;
+        assert_eq!(
+            background_edit(true, CaretPosition::Start),
+            ValueEdit::Replace
+        );
+        assert_eq!(
+            background_edit(false, CaretPosition::Start),
+            ValueEdit::Prepend
+        );
+        assert_eq!(
+            background_edit(false, CaretPosition::Idle),
+            ValueEdit::Append
+        );
+        assert_eq!(
+            background_edit(false, CaretPosition::End),
+            ValueEdit::Append
+        );
     }
 
     #[test]

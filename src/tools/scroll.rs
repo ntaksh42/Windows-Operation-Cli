@@ -73,10 +73,6 @@ pub struct ScrollParams {
 /// returns the confirmation message, or an error string for an invalid
 /// type/direction combination.
 pub fn scroll(params: ScrollParams) -> Result<String, String> {
-    // Tell the human the desktop is being driven; concurrent manual input
-    // steals focus and breaks the capture path.
-    let _overlay = crate::overlay::InputOverlay::show();
-    let point = resolve_point_optional(params.loc, params.label)?;
     let scroll_type = params.scroll_type.unwrap_or(ScrollType::Vertical);
     let direction = params.direction.unwrap_or(ScrollDirection::Down);
     let wheel_times = params.wheel_times.unwrap_or(1);
@@ -96,6 +92,14 @@ pub fn scroll(params: ScrollParams) -> Result<String, String> {
         return Ok(r#"Invalid direction. Use "left" or "right"."#.to_string());
     }
 
+    if crate::background::reason().is_some() {
+        return scroll_in_background(&params, scroll_type, direction, wheel_times as u32);
+    }
+
+    // Tell the human the desktop is being driven; concurrent manual input
+    // steals focus and breaks the capture path.
+    let _overlay = crate::overlay::InputOverlay::show();
+    let point = resolve_point_optional(params.loc, params.label)?;
     let modifier = input_sim::ModifierGuard::press(params.modifier.as_deref())?;
 
     if let Some((x, y)) = point {
@@ -151,6 +155,48 @@ pub fn scroll(params: ScrollParams) -> Result<String, String> {
     let (x, y) = point.unwrap_or_else(input_sim::get_cursor_pos);
     Ok(format!(
         "Scrolled {} {} by {wheel_times} wheel times at ({x},{y}).",
+        scroll_type.label(),
+        direction.label()
+    ))
+}
+
+/// UIA small-increment steps per wheel notch; one notch scrolls about three
+/// lines.
+const STEPS_PER_NOTCH: u32 = 3;
+
+/// Background-mode `Scroll`: scrolls the labelled element's scroll container
+/// through UI Automation instead of moving the cursor and turning the wheel.
+fn scroll_in_background(
+    params: &ScrollParams,
+    scroll_type: ScrollType,
+    direction: ScrollDirection,
+    wheel_times: u32,
+) -> Result<String, String> {
+    let label = params.label.ok_or_else(|| {
+        "Background mode scrolls through UI Automation, which needs a label from Snapshot; \
+         loc coordinates would need the mouse wheel."
+            .to_string()
+    })?;
+    if params.modifier.is_some() {
+        return Err(
+            "modifier needs keyboard input, which background mode does not send.".to_string(),
+        );
+    }
+    let node = crate::tools::support::resolve_label_value(label)?;
+    let forward = matches!(direction, ScrollDirection::Down | ScrollDirection::Right);
+    let steps = crate::uia::scroll_element(
+        &node,
+        scroll_type == ScrollType::Horizontal,
+        forward,
+        wheel_times * STEPS_PER_NOTCH,
+    )?;
+    let end = if steps < wheel_times * STEPS_PER_NOTCH {
+        " (reached the end of the scroll range)"
+    } else {
+        ""
+    };
+    Ok(format!(
+        "Scrolled {} {} by {wheel_times} wheel times at element {label} (background mode){end}.",
         scroll_type.label(),
         direction.label()
     ))

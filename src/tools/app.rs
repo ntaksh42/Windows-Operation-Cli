@@ -226,6 +226,9 @@ fn switch(name: Option<&str>) -> Outcome {
         Ok(None) => return (format!("Application {} not found.", title_case(name)), None),
         Err(error) => return (error, None),
     };
+    if let Err(error) = crate::background::ensure_input_allowed("App switch") {
+        return (error, None);
+    }
 
     let was_minimized = window::is_minimized(target.handle);
     window::switch_to(target.handle);

@@ -303,7 +303,23 @@ impl SnapshotResult {
 /// On success, the accessibility-tree state is written to `state.rs` so
 /// subsequent Click/Type/Scroll/Move calls can resolve `label`s.
 pub fn snapshot(params: &SnapshotParams) -> Result<SnapshotOutput, String> {
-    publish(capture(params))
+    // While locked the foreground window is the lock screen and the desktop
+    // cannot be captured; one named window is still reachable.
+    if params.window.is_none()
+        && params.scope.unwrap_or(SnapshotScope::Foreground) == SnapshotScope::Foreground
+    {
+        crate::background::ensure_desktop_visible("A Snapshot of the foreground window")?;
+    }
+    if opt_bool(&params.use_vision, false)? {
+        crate::background::ensure_desktop_visible(
+            "use_vision=true (use Screenshot with window for an image)",
+        )?;
+    }
+    let mut output = publish(capture(params))?;
+    if let Some(note) = crate::background::locked_note() {
+        output.text = format!("{note}\n{}", output.text);
+    }
+    Ok(output)
 }
 
 /// A Snapshot of the application owning the top-level window `handle`, for a

@@ -76,6 +76,7 @@ keep image context and memory usage bounded.
 | `WINDOWS_MCP_AUDIT_LOG` | JSONL audit-log path. Each call records only its timestamp, tool name, and success status. |
 | `WINDOWS_MCP_INPUT_SETTLE_MS` | Delay in milliseconds after input actions. Defaults to `20`; values are clamped to `0`–`5000`. |
 | `WINDOWS_MCP_INPUT_OVERLAY` | Set to `0`, `false`, or `off` to suppress the red border shown while the server injects input. The border marks "hands off the desktop": concurrent manual input steals focus mid-action and invalidates DXGI desktop duplication, which then returns black frames. It is excluded from capture, so it never appears in Screenshot or Snapshot output. |
+| `WINDOWS_MCP_BACKGROUND` | Set to `1`, `true`, or `on` to never move the cursor, send keys, or take focus, so the server does not compete with a person using the desktop. The same mode turns on by itself while the session is locked. See [Background mode](#background-mode). |
 | `WINDOWS_MCP_CLICK_HOLD_MS` | Milliseconds the button is held between press and release on a click. Defaults to `15`; values are clamped to `0`–`1000`. |
 | `WINDOWS_MCP_SCREENSHOT_BACKEND` | Capture backend: `auto`, `dxgi`, or `gdi`. `auto` (the default) tries GDI first and falls back to DXGI. |
 | `WINDOWS_MCP_SCREENSHOT_SCALE` | Additional scaling applied to screenshots. Defaults to `1`; values are clamped to `0.1`–`1`. |
@@ -87,6 +88,24 @@ outside filename-based protection.
 Snapshot and UI Automation timeouts are soft budgets: a slow provider call
 cannot be interrupted, so it may overrun the budget, and the overrun is reported
 in the result.
+
+## Background mode
+
+Background mode drives windows through UI Automation and `PrintWindow` only.
+It is on when `WINDOWS_MCP_BACKGROUND=1` is set, and whenever the session is
+locked (where injected input would reach the lock screen or be rejected).
+
+| Tool | In background mode |
+| --- | --- |
+| `Snapshot` | Works. While locked, pass `window`; the foreground is the lock screen and `use_vision` is unavailable. |
+| `InvokeElement` | Works (`fallback_to_click` is refused). |
+| `Type` / `MultiEdit` | Need a `label`; the value is set with `ValuePattern`. `clear` replaces, `caret_position=start` prepends, otherwise the text is appended. `press_enter` is refused. |
+| `Scroll` | Needs a `label`; scrolls the nearest `ScrollPattern` container. `modifier` is refused. |
+| `Screenshot` | Works. While locked, pass `window`. |
+| `Click` / `Move` / `Shortcut` / `MultiSelect` / `App switch` | Refused with an error. |
+
+Store (UWP) apps such as Calculator can be suspended while the session is
+locked and then expose no controls.
 
 ## Troubleshooting
 

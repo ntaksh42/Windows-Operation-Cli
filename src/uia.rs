@@ -849,6 +849,129 @@ pub fn clear_focused_element_value() -> Result<bool, String> {
     }
 }
 
+/// How [`set_element_value`] combines new text with what a field holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueEdit {
+    Replace,
+    Append,
+    Prepend,
+}
+
+/// Writes text into a Snapshot element through `ValuePattern::SetValue`,
+/// without focusing it or sending keys. Returns the value read back.
+///
+/// Appending and prepending read the current value and write the whole result,
+/// so they replace the field's content in one step (and its undo history).
+pub fn set_element_value(
+    identity: &crate::state::ElementNode,
+    text: &str,
+    edit: ValueEdit,
+) -> Result<String, String> {
+    ensure_com_initialized()?;
+    let automation = create_automation().map_err(|error| error.to_string())?;
+    let element = find_matching_element(&automation, identity)?;
+    unsafe {
+        let pattern = element
+            .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+            .map_err(|_| {
+                format!(
+                    "Element {} ({:?}) has no ValuePattern, so its text cannot be set without keyboard input",
+                    identity.element_id, identity.name
+                )
+            })?;
+        if pattern
+            .CurrentIsReadOnly()
+            .map(|read_only| read_only.as_bool())
+            .unwrap_or(true)
+        {
+            return Err(format!(
+                "Element {} ({:?}) is read-only",
+                identity.element_id, identity.name
+            ));
+        }
+        let current = || {
+            pattern
+                .CurrentValue()
+                .map(|value| value.to_string())
+                .unwrap_or_default()
+        };
+        let value = match edit {
+            ValueEdit::Replace => text.to_string(),
+            ValueEdit::Append => current() + text,
+            ValueEdit::Prepend => format!("{text}{}", current()),
+        };
+        pattern
+            .SetValue(&windows::core::BSTR::from(value.as_str()))
+            .map_err(|error| format!("SetValue failed: {error}"))?;
+        Ok(current())
+    }
+}
+
+/// Scrolls the nearest scrollable element at or above a Snapshot element
+/// through `ScrollPattern`, without moving the cursor or sending wheel input.
+/// Each step is one `SmallIncrement`/`SmallDecrement`. Returns how many steps
+/// the provider accepted; scrolling stops early at the end of the range.
+pub fn scroll_element(
+    identity: &crate::state::ElementNode,
+    horizontal: bool,
+    forward: bool,
+    steps: u32,
+) -> Result<u32, String> {
+    ensure_com_initialized()?;
+    let automation = create_automation().map_err(|error| error.to_string())?;
+    let mut element = find_matching_element(&automation, identity)?;
+    unsafe {
+        let walker = automation
+            .ControlViewWalker()
+            .map_err(|error| error.to_string())?;
+        let pattern = loop {
+            if let Ok(pattern) =
+                element.GetCurrentPatternAs::<IUIAutomationScrollPattern>(UIA_ScrollPatternId)
+            {
+                let scrollable = if horizontal {
+                    pattern.CurrentHorizontallyScrollable()
+                } else {
+                    pattern.CurrentVerticallyScrollable()
+                };
+                if scrollable.is_ok_and(|value| value.as_bool()) {
+                    break pattern;
+                }
+            }
+            element = walker.GetParentElement(&element).map_err(|_| {
+                format!(
+                    "Neither element {} ({:?}) nor any container around it can scroll {}",
+                    identity.element_id,
+                    identity.name,
+                    if horizontal {
+                        "horizontally"
+                    } else {
+                        "vertically"
+                    }
+                )
+            })?;
+        };
+        let amount = if forward {
+            ScrollAmount_SmallIncrement
+        } else {
+            ScrollAmount_SmallDecrement
+        };
+        let mut done = 0;
+        for _ in 0..steps {
+            let result = if horizontal {
+                pattern.Scroll(amount, ScrollAmount_NoAmount)
+            } else {
+                pattern.Scroll(ScrollAmount_NoAmount, amount)
+            };
+            match result {
+                Ok(()) => done += 1,
+                Err(error) if done == 0 => return Err(format!("Scroll failed: {error}")),
+                Err(_) => break,
+            }
+        }
+        Ok(done)
+    }
+}
+
 /// Reads the focused element's text through `ValuePattern`, when it exposes
 /// one.
 ///

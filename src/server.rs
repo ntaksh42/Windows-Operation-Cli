@@ -172,7 +172,7 @@ impl WindowsOperationCliServer {
 
     #[tool(
         name = "Type",
-        description = "Types text at specified coordinates [x, y] or passing a UI element's label/id. Set clear=True to clear existing text first, False to append. Set press_enter=True to submit after typing. Set caret_position to 'start' (beginning), 'end' (end), or 'idle' (default). Provide either loc or label."
+        description = "Types text at specified coordinates [x, y] or passing a UI element's label/id. Set clear=True to clear existing text first, False to append. Set press_enter=True to submit after typing. Set caret_position to 'start' (beginning), 'end' (end), or 'idle' (default). Provide either loc or label. In background mode (WINDOWS_MCP_BACKGROUND=1 or a locked session) label is required and the text is set through UI Automation without keyboard input."
     )]
     async fn type_tool(
         &self,
@@ -188,7 +188,7 @@ impl WindowsOperationCliServer {
 
     #[tool(
         name = "Scroll",
-        description = "Scrolls at coordinates [x, y], a UI element's label/id, or current mouse position if loc=None. Type: vertical (default) or horizontal. Direction: up/down for vertical, left/right for horizontal. modifier optionally holds shift/ctrl/alt/win during scrolling. wheel_times controls amount (1 wheel ≈ 3-5 lines)."
+        description = "Scrolls at coordinates [x, y], a UI element's label/id, or current mouse position if loc=None. Type: vertical (default) or horizontal. Direction: up/down for vertical, left/right for horizontal. modifier optionally holds shift/ctrl/alt/win during scrolling. wheel_times controls amount (1 wheel ≈ 3-5 lines). In background mode (WINDOWS_MCP_BACKGROUND=1 or a locked session) label is required and scrolling goes through UI Automation."
     )]
     async fn scroll(
         &self,
@@ -253,7 +253,7 @@ impl WindowsOperationCliServer {
 
     #[tool(
         name = "MultiEdit",
-        description = "Enters text into multiple input fields at specified coordinates locs=[[x,y,text], ...] or using labels=[[label,text], ...]. Provide either locs or labels."
+        description = "Enters text into multiple input fields at specified coordinates locs=[[x,y,text], ...] or using labels=[[label,text], ...]. Provide either locs or labels. In background mode (WINDOWS_MCP_BACKGROUND=1 or a locked session) only labels are accepted."
     )]
     async fn multi_edit(
         &self,

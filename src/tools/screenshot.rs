@@ -258,6 +258,7 @@ pub fn screenshot(params: &ScreenshotParams) -> Result<ScreenshotOutput, String>
         }
         return screenshot_window(query, params);
     }
+    crate::background::ensure_desktop_visible("A desktop Screenshot")?;
     let result = snapshot::capture(&SnapshotParams {
         scope: None,
         window: None,

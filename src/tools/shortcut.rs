@@ -16,6 +16,7 @@ pub struct ShortcutParams {
 /// Presses the `+`-separated keys in `shortcut` together and returns the
 /// confirmation message.
 pub fn shortcut(params: ShortcutParams) -> Result<String, String> {
+    crate::background::ensure_input_allowed("Shortcut")?;
     // Tell the human the desktop is being driven; concurrent manual input
     // steals focus and breaks the capture path.
     let _overlay = crate::overlay::InputOverlay::show();

@@ -28,6 +28,7 @@ pub struct MultiSelectParams {
 /// Clicks each resolved coordinate (holding Ctrl if `press_ctrl`) and
 /// returns the confirmation message.
 pub fn multi_select(params: MultiSelectParams) -> Result<String, String> {
+    crate::background::ensure_input_allowed("MultiSelect")?;
     if params.locs.is_none() && params.labels.is_none() {
         return Err("Either locs or labels must be provided.".to_string());
     }

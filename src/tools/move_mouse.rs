@@ -40,6 +40,7 @@ pub struct MoveParams {
 /// Moves (or drags) the cursor to the resolved location and returns the
 /// confirmation message.
 pub fn move_mouse(params: MoveParams) -> Result<String, String> {
+    crate::background::ensure_input_allowed("Move")?;
     let drag = opt_bool(&params.drag, false)?;
     // Tell the human the desktop is being driven; concurrent manual input
     // steals focus and breaks the capture path.

@@ -7,6 +7,7 @@
 //! `src/main.rs` is the thin stdio binary on top of this.
 
 pub mod apps;
+pub mod background;
 pub mod capture;
 pub mod display;
 pub mod fuzzy;

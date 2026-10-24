@@ -62,7 +62,7 @@ pub fn validate_element_point(node: &state::ElementNode) -> Result<(i32, i32), S
 /// resolves through the generation-checked path (so one from a superseded
 /// Snapshot is reported as stale instead of silently indexing to an
 /// unrelated element), a smaller value stays a positional label.
-fn resolve_label_value(label: i64) -> Result<state::ElementNode, String> {
+pub(crate) fn resolve_label_value(label: i64) -> Result<state::ElementNode, String> {
     if label < 0 {
         return Err(format!("Label {label} out of range"));
     }

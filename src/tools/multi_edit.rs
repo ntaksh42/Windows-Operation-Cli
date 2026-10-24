@@ -33,6 +33,10 @@ pub fn multi_edit(params: MultiEditParams) -> Result<String, String> {
         return Err("Either locs or labels must be provided.".to_string());
     }
 
+    if crate::background::reason().is_some() {
+        return multi_edit_in_background(params);
+    }
+
     let mut entries: Vec<(InputTarget, String)> = Vec::new();
     if let Some(locs) = params.locs {
         entries.extend(
@@ -87,6 +91,42 @@ pub fn multi_edit(params: MultiEditParams) -> Result<String, String> {
     }
 
     Ok(format!("Multi-edited elements at: {}", elements.join(", ")))
+}
+
+/// Background-mode `MultiEdit`: replaces each labelled field's value through
+/// UI Automation. Coordinates are refused, since they need a click.
+fn multi_edit_in_background(params: MultiEditParams) -> Result<String, String> {
+    if params.locs.is_some() {
+        return Err(
+            "Background mode edits through UI Automation, which needs labels from Snapshot; \
+             locs coordinates would need mouse and keyboard input."
+                .to_string(),
+        );
+    }
+    let labels = params
+        .labels
+        .map(ListOrString::into_list)
+        .transpose()?
+        .unwrap_or_default();
+    if labels.is_empty() {
+        return Err("At least one loc or label entry must be provided.".to_string());
+    }
+    let total = labels.len();
+    let nodes = labels
+        .iter()
+        .map(|(label, _)| crate::tools::support::resolve_label_value(*label))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("Completed 0 of {total} edits: {error}"))?;
+    let mut elements = Vec::with_capacity(total);
+    for (index, (node, (label, text))) in nodes.iter().zip(&labels).enumerate() {
+        let report = typing::set_value_report(node, text, crate::uia::ValueEdit::Replace)
+            .map_err(|error| format!("Completed {index} of {total} edits: {error}"))?;
+        elements.push(format!("element {label}: {report}"));
+    }
+    Ok(format!(
+        "Multi-edited (background mode) {}",
+        elements.join(", ")
+    ))
 }
 
 #[cfg(test)]
